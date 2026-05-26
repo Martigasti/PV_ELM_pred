@@ -14,9 +14,9 @@ python_prediction/
 │   ├── PV_AC_20200801_20250706_Palaiseau.csv   # Données brutes (PAC, pas 15 min)
 │   ├── data_30min.npy                          # Cache : série rééchantillonnée à 30 min
 │   └── is_day_mask.npy                         # Cache : masque jour/nuit (élévation solaire > 0°)
-├── observations.ipynb                          # Notebook d'exploration / figures
 ├── requirements.txt                            # Dépendances Python
 ├── scripts/
+│   ├── observations.ipynb         # Notebook d'exploration / figures
 │   ├── preprocessing.py           # Construit data/data_30min.npy depuis le CSV
 │   ├── run_full.py                # Point d'entrée : lance tous les scripts en mode complet
 │   ├── utils.py                   # Helpers partagés : données, prédicteurs, métriques (NICE), masque jour
