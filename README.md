@@ -25,7 +25,7 @@ python_prediction/
 │   ├── dr_ar_ols.py               # Baseline linéaire AR-OLS (pseudo-inverse)
 │   ├── dr_elm_ols.py              # ELM avec poids de sortie par pseudo-inverse
 │   ├── dr_elm_ridge.py            # ELM avec poids de sortie par régression Ridge
-│   └── bench_elm.py               # Mesure les temps d'entraînement / inférence de l'ELM
+│   └── retrain_elm.py             # Réentraînement ELM avec hyperparams figés, mesure des temps
 ├── results/                       # CSV de résultats et de prédictions
 └── figures/                       # Graphiques (prédictions vs vérité, slides, etc.)
 ```
@@ -84,12 +84,12 @@ python scripts/dr_elm_ridge.py
 
 ### Benchmark des temps de calcul (ELM)
 
-`bench_elm.py` mesure les temps de `fit` et de `predict` de l'ELM
-(variantes OLS et Ridge) avec les meilleurs hyperparamètres figés,
-sans grid search.
+`retrain_elm.py` réentraîne l'ELM (variantes OLS et Ridge) avec les
+meilleurs hyperparamètres figés (sans grid search) et mesure les temps
+de `fit` et de `predict`.
 
 ```bash
-python scripts/bench_elm.py
+python scripts/retrain_elm.py
 ```
 
 ## Modèles évalués
