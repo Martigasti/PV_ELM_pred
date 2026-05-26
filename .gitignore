@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+explanations/
+presentation/
+results_code.tex
+rapport/
