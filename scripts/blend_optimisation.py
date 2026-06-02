@@ -1,15 +1,14 @@
 """
-Baselines de persistance (P, Pcyclic, BLEND) sur l'ensemble des données.
+Persistence baselines (P, Pcyclic, BLEND) over the whole dataset.
 
-Poids du BLEND appris par phase en minimisant l'erreur quadratique sur le
-jeu d'entraînement (moindres carrés avec solution analytique) :
+BLEND weights learned per phase by minimizing the squared error on the
+training set (least squares with analytical solution):
 
-    lam* = sum((Pc - y_true)(Pc - P)) / sum((Pc - P)^2)   borné dans [0, 1]
+    lam* = sum((Pc - y_true)(Pc - P)) / sum((Pc - P)^2)   clipped to [0, 1]
 
-où P(t) = y(t) et Pc(t) = y(t + FH - T_period). Lambda est estimé
-directement à partir des données d'entraînement en minimisant la MSE,
-plutôt que dérivé de la structure de corrélation comme dans la formule de
-l'article (voir blend_correlation.py).
+where P(t) = y(t) and Pc(t) = y(t + FH - T_period). Lambda is estimated
+directly from the training data by minimizing the MSE,
+rather than derived from the correlation structure (see blend_correlation.py).
 """
 import os
 import time
@@ -36,14 +35,14 @@ from utils import (
 SMOKE_TEST = os.environ.get("SMOKE_TEST", "1") == "1"
 
 if SMOKE_TEST:
-    print("*** MODE TEST DE FUMEE ***")
+    print("*** SMOKE TEST MODE ***")
     Ndata    = 1000
     LB_list  = [48]
     FH_list  = [1, 12]
     ratio    = 0.50
     T_period = 48
 else:
-    print("*** MODE COMPLET ***")
+    print("*** FULL MODE ***")
     Ndata    = round(2 * 365.25 * 48)
     LB_list  = [48]
     FH_list  = [1, 2, 6, 12, 20]
@@ -60,21 +59,20 @@ PRED_FILE = RESULTS_DIR / "Predictions_BLEND_optimisation.csv"
 
 
 # ============================================================================
-# BLEND : lam appris par phase par moindres carres sur le train
+# BLEND: lam learned per phase by least squares on the train set
 # ============================================================================
 def fit_blend_lambda_per_phase(
     data_train: np.ndarray, FH: int, T_period: int
 ) -> np.ndarray:
-    """Solution analytique lam* = sum((Pc - y)(Pc - P)) / sum((Pc - P)^2), bornée, par phase."""
+    """Analytical solution lam* = sum((Pc - y)(Pc - P)) / sum((Pc - P)^2), clipped, per phase."""
     N = len(data_train)
     lam_phase = np.zeros(T_period)
     for k_tgt in range(1, T_period + 1):
         start = (k_tgt - 1 - FH) % T_period
         idx_t = np.arange(start, N - FH, T_period)
-        # On a besoin que Pc(t) = data[t + FH - T_period] soit dans les bornes
-        # => t >= T_period - FH
+        # We need Pc(t) = data[t + FH - T_period] to be within bounds => t >= T_period - FH
         idx_t = idx_t[idx_t >= T_period - FH]
-        # On a besoin d'au moins 3 points, sinon on replie sur λ=0.5 (poids égal)
+        # We need at least 3 points, otherwise fall back to λ=0.5 (equal weight)
         if len(idx_t) < 3:
             lam_phase[k_tgt - 1] = 0.5
             continue
@@ -83,7 +81,7 @@ def fit_blend_lambda_per_phase(
         Pc_pred = data_train[idx_t + FH - T_period]
         diff = Pc_pred - P_pred
         denom = np.sum(diff * diff)
-        # P et P° identiques sur cette phase : λ indéfini, on prend 0.5 par convention
+        # P and P° identical on this phase: λ undefined, take 0.5 by convention
         if denom < 1e-12:
             lam_phase[k_tgt - 1] = 0.5
             continue
@@ -93,7 +91,7 @@ def fit_blend_lambda_per_phase(
 
 
 # ============================================================================
-# EXECUTION D'UNE CONFIG (LB, FH)
+# RUN ONE CONFIG (LB, FH)
 # ============================================================================
 def run_one(
     data: np.ndarray,
@@ -101,7 +99,7 @@ def run_one(
     LB: int,
     FH: int,
 ) -> tuple[list[dict], list[pd.DataFrame]]:
-    print(f"\n=== LB={LB} ({LB/48:g}j) | FH={FH} ({FH*0.5:.1f}h) ===")
+    print(f"\n=== LB={LB} ({LB/48:g}d) | FH={FH} ({FH*0.5:.1f}h) ===")
 
     PVin, PVout = sertomat(data, LB, FH)
     idx_split = floor(ratio * PVin.shape[0])
@@ -129,7 +127,7 @@ def run_one(
             )
         )
 
-    # ---- Persistance P
+    # ---- Persistence P
     y_pred_P = Persis_simple_test
     rows.append(
         build_metric_row(
@@ -139,7 +137,7 @@ def run_one(
     )
     log_predictions("Persistence_P", y_test, y_pred_P)
 
-    # ---- Persistance cyclique
+    # ---- Cyclic persistence
     y_pred_Pc = predict_cyclic_persistence(
         data, offset_base, n_test, T_period, fallback=y_pred_P
     )
@@ -152,9 +150,9 @@ def run_one(
     log_predictions("Persistence_Pcyclic", y_test, y_pred_Pc)
 
     # ---- BLEND
-    # La tranche de train se termine à idx_split + LB + FH - 1 (inclus) pour
-    # que la dernière cible de train reste dans l'échantillon
-    # => tranche [:idx_split + LB + FH]
+    # The train slice ends at idx_split + LB + FH - 1 (inclusive) so that
+    # the last train target stays within the sample
+    # => slice [:idx_split + LB + FH]
     data_tr_raw = data[: idx_split + LB + FH]
     lam_phase = fit_blend_lambda_per_phase(data_tr_raw, FH, T_period)
 
@@ -181,12 +179,12 @@ def run_one(
 # ============================================================================
 def main() -> None:
     data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
-    print(f"Donnees : {len(data)} points ({len(data)/48/365.25:.2f} ans)")
+    print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
 
     is_day_full = compute_is_day_mask(len(data))
     print(
-        f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} pas "
-        f"({is_day_full.mean()*100:.1f}% jour)"
+        f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} steps "
+        f"({is_day_full.mean()*100:.1f}% day)"
     )
 
     all_rows: list[dict] = []
@@ -204,16 +202,16 @@ def main() -> None:
         out_path_all=str(OUT_FILE_ALL),
         out_path_day=str(OUT_FILE_DAY),
     )
-    print("\n===== RESULTATS (tous les echantillons) =====")
+    print("\n===== RESULTS (all samples) =====")
     print(df_all.to_string())
-    print("\n===== RESULTATS (jour uniquement) =====")
+    print("\n===== RESULTS (day only) =====")
     print(df_day.to_string())
-    print(f"\nResultats _all : {OUT_FILE_ALL}")
-    print(f"Resultats _day : {OUT_FILE_DAY}")
+    print(f"\nResults _all : {OUT_FILE_ALL}")
+    print(f"Results _day : {OUT_FILE_DAY}")
 
     predictions = pd.concat(all_pred_rows, ignore_index=True)
     predictions.to_csv(PRED_FILE, index=False)
-    print(f"Predictions sauvegardees : {PRED_FILE}")
+    print(f"Predictions saved: {PRED_FILE}")
 
 
 if __name__ == "__main__":

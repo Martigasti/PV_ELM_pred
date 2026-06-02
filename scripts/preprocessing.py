@@ -1,10 +1,10 @@
 """
-Prétraitement du jeu de données PV_AC Palaiseau.
+Preprocessing of the PV_AC Palaiseau dataset.
 
-Lit `PV_AC_20200801_20250706_Palaiseau.csv`, rééchantillonne la colonne PAC
-en moyennes sur 30 minutes, et sauvegarde le tableau 1D résultant dans
-`data_30min.npy`. Les scripts dans scripts/ consomment ce cache via leur
-helper `load_30min`.
+Reads `PV_AC_20200801_20250706_Palaiseau.csv`, resamples the PAC column
+into 30-minute averages, and saves the resulting 1D array to
+`data_30min.npy`. The scripts in scripts/ consume this cache via their
+`load_30min` helper.
 """
 
 import os
@@ -19,31 +19,31 @@ CACHE_NPY = os.path.join(DATA_DIR, 'data_30min.npy')
 
 
 def main():
-    # Chargement des données brutes (pas de temps de 15 min)
+    # Load the raw data (15-min time step)
     df = pd.read_csv(CSV_FILE)
     df['datetime'] = pd.to_datetime(
         df['datetime'].astype(str).str.split('+').str[0],
         format='%Y-%m-%d %H:%M:%S',
     )
     df = df.sort_values('datetime').set_index('datetime')
-    print(f'Lignes brutes : {len(df):,}')
-    print(f'Plage         : {df.index.min()} -> {df.index.max()}')
+    print(f'Raw rows      : {len(df):,}')
+    print(f'Range         : {df.index.min()} -> {df.index.max()}')
 
-    # Rééchantillonnage à 30 min (moyenne des deux mesures de 15 min)
+    # Resample to 30 min (average of the two 15-min measurements)
     arr = df['PAC'].resample('30min').mean().to_numpy()
-    print(f'Lignes 30-min : {len(arr):,}  ({len(arr)/48/365.25:.2f} annees)')
-    print(f'Moy={arr.mean():.1f} W,  max={arr.max():.1f} W')
+    print(f'30-min rows   : {len(arr):,}  ({len(arr)/48/365.25:.2f} years)')
+    print(f'Mean={arr.mean():.1f} W,  max={arr.max():.1f} W')
 
-    # Sauvegarde du cache
+    # Save the cache
     os.makedirs(DATA_DIR, exist_ok=True)
     np.save(CACHE_NPY, arr)
-    print(f'Sauve {CACHE_NPY}  ({arr.nbytes/1e6:.1f} MB, {len(arr):,} echantillons)')
+    print(f'Saved {CACHE_NPY}  ({arr.nbytes/1e6:.1f} MB, {len(arr):,} samples)')
 
-    # Vérification que la taille est suffisante pour le mode complet (2 ans)
+    # Check the size is sufficient for full mode (2 years)
     N_FULL = round(2 * 365.25 * 48)
-    print(f'Requis pour run complet : {N_FULL:,}')
-    print(f'Disponible : {len(arr):,}')
-    assert len(arr) >= N_FULL, 'Pas assez d\'echantillons pour le run en mode complet.'
+    print(f'Required for full run : {N_FULL:,}')
+    print(f'Available : {len(arr):,}')
+    assert len(arr) >= N_FULL, 'Not enough samples for the full-mode run.'
 
 
 if __name__ == '__main__':

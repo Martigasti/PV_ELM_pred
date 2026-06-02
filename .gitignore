@@ -2,5 +2,12 @@ __pycache__/
 *.pyc
 explanations/
 presentation/
-results_code.tex
+results_code/
 rapport/
+Sujet_ELM_OPTI-6.pdf
+data_cs/
+data/PV_AC_30min_2ans.csv
+diag_ridge_vs_ols.py
+scripts/retrain_elm.py
+scripts/export_data_used.py
+CITATION.cff

@@ -1,28 +1,28 @@
 """
-Utils partagés pour les scripts de prévision PV_AC Palaiseau.
+Shared utils for the PV_AC Palaiseau forecasting scripts.
 
-Deux groupes de fonctions, tous utilisés par blend_optimisation, blend_correlation,
-dr_ar_ols, dr_elm_ols et dr_elm_ridge :
+Two groups of functions, all used by blend_optimisation, blend_correlation,
+dr_ar_ols, dr_elm_ols and dr_elm_ridge:
 
-  * Données / features / prédicteurs : load_30min, sertomat,
+  * Data / features / predictors: load_30min, sertomat,
     time_features_for_targets, predict_cyclic_persistence, predict_blend.
-  * Évaluation : compute_is_day_mask (élévation solaire > 0 deg à Palaiseau),
-    metrics_on_subset, build_metric_row, split_and_save. Ces fonctions
-    produisent deux tableaux de benchmark parallèles :
-        - `_all` : métriques sur tous les échantillons de test (nuits incluses).
-        - `_day` : métriques restreintes aux échantillons où le soleil est
-                  au-dessus de l'horizon géométrique à Palaiseau.
+  * Evaluation: compute_is_day_mask (solar elevation > 0 deg at Palaiseau),
+    metrics_on_subset, build_metric_row, split_and_save. These functions
+    produce two parallel benchmark tables:
+        - `_all`: metrics over all test samples (nights included).
+        - `_day`: metrics restricted to the samples where the sun is
+                  above the geometric horizon at Palaiseau.
 """
 from math import sqrt
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pvlib  # Pour la detection jour/nuit (angle du soleil)
+import pvlib  # For day/night detection (sun angle)
 
 
 # ============================================================================
-# CHARGEMENT DES DONNEES
+# DATA LOADING
 # ============================================================================
 def load_30min(csv_path: Path, cache_path: Path, n_rows: int | None = None) -> np.ndarray:
     if cache_path.exists():
@@ -43,15 +43,15 @@ def load_30min(csv_path: Path, cache_path: Path, n_rows: int | None = None) -> n
 
 
 # ============================================================================
-# MATRICE SUPERVISEE
+# SUPERVISED MATRIX
 # ============================================================================
 def sertomat(x: np.ndarray, LB: int, FH: int) -> tuple[np.ndarray, np.ndarray]:
-    """Convertit une série temporelle en matrice supervisée (X, y).
+    """Convert a time series into a supervised matrix (X, y).
 
-    Chaque ligne i de X contient les LB valeurs passées x[i..i+LB-1],
-    et y[i] est la cible x[i+LB+FH-1] (soit FH pas plus loin que la
-    dernière entrée). Utilisé pour construire les jeux train/test de tous
-    les modèles (persistance, BLEND, AR-OLS, ELM).
+    Each row i of X holds the LB past values x[i..i+LB-1],
+    and y[i] is the target x[i+LB+FH-1] (i.e. FH steps beyond the
+    last input). Used to build the train/test sets of all the
+    models (persistence, BLEND, AR-OLS, ELM).
     """
     x = np.asarray(x, dtype=float)
     N = len(x)
@@ -62,12 +62,12 @@ def sertomat(x: np.ndarray, LB: int, FH: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 # ============================================================================
-# FEATURES TEMPORELLES CYCLIQUES
+# CYCLIC TIME FEATURES
 # ============================================================================
 def time_features_for_targets(
     n_samples: int, LB: int, FH: int, steps_per_day: int = 48
 ) -> np.ndarray:
-    # Encodage sin/cos pour que 23h<->0h et 31 déc<->1er jan soient proches
+    # sin/cos encoding so that 23h<->0h and Dec 31<->Jan 1 are close
     idx_abs = np.arange(n_samples) + LB + FH - 1
     h = (idx_abs % steps_per_day) * (24.0 / steps_per_day)
     j = (idx_abs // steps_per_day) % 365.25
@@ -83,7 +83,7 @@ def time_features_for_targets(
 
 
 # ============================================================================
-# PREDICTEURS PERSISTANCE / BLEND
+# PERSISTENCE / BLEND PREDICTORS
 # ============================================================================
 def predict_cyclic_persistence(
     data: np.ndarray,
@@ -109,10 +109,10 @@ def predict_blend(
     offset_base: int,
     T_period: int,
 ) -> np.ndarray:
-    """Combinaison convexe lam*P + (1-lam)*Pc, avec lam choisi par phase cible.
+    """Convex combination lam*P + (1-lam)*Pc, with lam chosen per target phase.
 
-    lam_phase doit être pré-borné dans [0, 1] et indexé 0..T_period-1
-    où phase = (target_index - 1) % T_period.
+    lam_phase must be pre-clipped to [0, 1] and indexed 0..T_period-1
+    where phase = (target_index - 1) % T_period.
     """
     n_test = len(y_pred_P)
     y_pred_BL = np.empty(n_test)
@@ -125,22 +125,22 @@ def predict_blend(
 
 
 # ============================================================================
-# MASQUE JOUR/NUIT (élévation solaire > 0 deg a Palaiseau)
+# DAY/NIGHT MASK (solar elevation > 0 deg at Palaiseau)
 # ============================================================================
 LAT_PALAISEAU = 48.7128
 LON_PALAISEAU = 2.2188
 
-# arr[0] correspond au premier creneau de 30 min de la serie (2020-08-01 00:00 UTC).
-# Le masque est mis en cache au premier calcul.
+# arr[0] corresponds to the first 30-min slot of the series (2020-08-01 00:00 UTC).
+# The mask is cached on first computation.
 _DEBUT_SERIE_UTC = "2020-08-01 00:00:00"
 _FREQ = "30min"
 _MASK_CACHE_NPY = Path(__file__).resolve().parent.parent / "data" / "is_day_mask.npy"
 
 
 def compute_is_day_mask(n_steps: int, elevation_threshold_deg: float = 0.0) -> np.ndarray:
-    """Tableau booléen, True où le soleil > seuil sur le créneau de 30 min.
+    """Boolean array, True where the sun > threshold over the 30-min slot.
 
-    Mis en cache sur disque pour ne payer l'appel pvlib qu'une seule fois par N.
+    Cached on disk so the pvlib call is paid only once per N.
     """
     if _MASK_CACHE_NPY.exists():
         cached = np.load(_MASK_CACHE_NPY)
@@ -160,7 +160,7 @@ def compute_is_day_mask(n_steps: int, elevation_threshold_deg: float = 0.0) -> n
 
 
 # ============================================================================
-# METRIQUES
+# METRICS
 # ============================================================================
 _METRIC_KEYS = ["RMSE", "nRMSE", "nMBE", "nMAE", "R2",
                 "NICE1", "NICE2", "NICE3", "NICE_Sigma"]
@@ -176,11 +176,11 @@ def metrics_on_subset(
     persis_ref: np.ndarray,
     mask: np.ndarray | None = None,
 ) -> tuple[float, ...]:
-    """RMSE/nRMSE/nMBE/nMAE/R2/NICE1-3/NICE_Sigma restreints au `mask`.
+    """RMSE/nRMSE/nMBE/nMAE/R2/NICE1-3/NICE_Sigma restricted to `mask`.
 
-    NICE_k est calculé contre la référence de persistance recalculée sur le
-    même sous-ensemble — utiliser la référence globale mélangerait les
-    populations et rendrait les chiffres incomparables.
+    NICE_k is computed against the persistence reference recomputed on the
+    same subset — using the global reference would mix the populations and
+    make the numbers incomparable.
     """
     y_test = np.asarray(y_test).ravel()
     y_pred = np.asarray(y_pred).ravel()
@@ -224,7 +224,7 @@ def build_metric_row(
     mask_day: np.ndarray,
     extra_fields: dict | None = None,
 ) -> dict:
-    """Ligne de résultat avec les deux blocs de métriques `_all` et `_day`."""
+    """Result row with both metric blocks `_all` and `_day`."""
     m_all = metrics_on_subset(y_test, y_pred, persis_ref, mask=None)
     m_day = metrics_on_subset(y_test, y_pred, persis_ref, mask=mask_day)
     row: dict = dict(Method=method, LB_days=LB / 48, FH_hours=FH * 0.5)
@@ -243,7 +243,7 @@ def split_and_save(
     out_path_all: str,
     out_path_day: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Sépare les lignes fusionnées en deux CSV avec colonnes de métriques sans suffixe."""
+    """Split the merged rows into two CSVs with un-suffixed metric columns."""
     base = ["Method", "LB_days", "FH_hours"]
     extras = list(extra_cols or [])
 

@@ -1,64 +1,39 @@
 """
-Prévision AR-OLS sur les données PV_AC Palaiseau — baseline linéaire pour ELM.
+AR-OLS forecasting on the PV_AC Palaiseau data — linear baseline for ELM.
 
-Mêmes entrées que dr_elm_ols.py (fenêtre de LB retards + 4 features
-temporelles cycliques), mais sans couche cachée (non-linéarité).
+Same inputs as dr_elm_ols.py (window of LB lags + 4 cyclic time
+features), but without a hidden layer (non-linearity).
 
-Comparer AR-OLS à ELM quantifie ce que les fonctions de transfert
-sigmoïdes apportent par rapport à un modèle purement linéaire sur les mêmes
+Comparing AR-OLS to ELM quantifies what the sigmoid transfer
+functions add relative to a purely linear model on the same
 features.
 
-Modèles reportés par (LB, FH) :
+Models reported per (LB, FH):
     - Persistence_P : y_pred = PAC(t)
     - Persistence_Pcyclic  : y_pred = PAC(t + FH - 24h)
-    - BLEND_opti : combinaison convexe par moindres carrés des deux persistances
-    - AR_OLS : OLS linéaire sur [LB retards + 4 features temporelles]
+    - BLEND_opti : convex least-squares combination of the two persistences
+    - AR_OLS : linear OLS on [LB lags + 4 time features]
 """
-import os
 import time
-from math import floor
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-from blend_optimisation import fit_blend_lambda_per_phase
-from utils import (
-    build_metric_row,
+from elm_common import (
+    CACHE_NPY,
+    CSV_FILE,
+    FH_list,
+    LB_list,
+    Ndata,
+    RESULTS_DIR,
+    baseline_rows,
     compute_is_day_mask,
     load_30min,
-    predict_blend,
-    predict_cyclic_persistence,
-    sertomat,
-    split_and_save,
-    time_features_for_targets,
+    make_log_predictions,
+    prepare_split,
 )
+from utils import build_metric_row, split_and_save
 
 
-# ============================================================================
-# CONFIG
-# ============================================================================
-SMOKE_TEST = os.environ.get("SMOKE_TEST", "1") == "1"
-
-if SMOKE_TEST:
-    print("*** MODE TEST DE FUMEE ***")
-    Ndata    = 1000
-    LB_list  = [48]
-    FH_list  = [1, 12]
-    ratio    = 0.50
-    T_period = 48
-else:
-    print("*** MODE COMPLET ***")
-    Ndata    = round(2 * 365.25 * 48)
-    LB_list  = [48]
-    FH_list  = [1, 2, 6, 12, 20]
-    ratio    = 0.50
-    T_period = 48
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CSV_FILE = PROJECT_ROOT / "data" / "PV_AC_20200801_20250706_Palaiseau.csv"
-CACHE_NPY = PROJECT_ROOT / "data" / "data_30min.npy"
-RESULTS_DIR = PROJECT_ROOT / "results"
 OUT_FILE_ALL = RESULTS_DIR / "Results_AR_OLS_all.csv"
 OUT_FILE_DAY = RESULTS_DIR / "Results_AR_OLS_day.csv"
 PRED_FILE = RESULTS_DIR / "Predictions_AR_OLS.csv"
@@ -75,12 +50,12 @@ def train_ar_ols(X: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 def ar_predict(X: np.ndarray, beta: np.ndarray) -> np.ndarray:
     X_aug = np.column_stack([np.ones(X.shape[0]), X])
-    # On borne les valeurs négatives à 0 car PAC est une puissance physique
+    # Clip negative values to 0 because PAC is a physical power
     return np.clip(X_aug @ beta, a_min=0.0, a_max=None)
 
 
 # ============================================================================
-# EXECUTION D'UNE CONFIG (LB, FH)
+# RUN ONE CONFIG (LB, FH)
 # ============================================================================
 def run_one(
     data: np.ndarray,
@@ -88,92 +63,26 @@ def run_one(
     LB: int,
     FH: int,
 ) -> tuple[list[dict], list[pd.DataFrame]]:
-    print(f"\n=== LB={LB} ({LB/48:g}j) | FH={FH} ({FH*0.5:.1f}h) ===")
+    print(f"\n=== LB={LB} ({LB/48:g}d) | FH={FH} ({FH*0.5:.1f}h) ===")
 
-    PVin, PVout = sertomat(data, LB, FH)
-    mu_in = PVin.mean(axis=0)
-    sd_in = PVin.std(axis=0, ddof=1)
-    sd_in = np.where(sd_in == 0, 1.0, sd_in)
-    PVin_norm = (PVin - mu_in) / sd_in
-
-    tfeat = time_features_for_targets(PVin_norm.shape[0], LB, FH)
-    PVin_norm = np.concatenate([PVin_norm, tfeat], axis=1)
-
-    idx_split = floor(ratio * PVin_norm.shape[0])
-    X_train, X_test = PVin_norm[:idx_split], PVin_norm[idx_split:]
-    y_train, y_test = PVout[:idx_split], PVout[idx_split:]
-    n_test = len(y_test)
-
-    Persis_simple_test = PVin[idx_split:, -1]
-    offset_base = idx_split + LB + FH - 1
-    mask_day_test = is_day_full[offset_base : offset_base + n_test]
-
-    rows: list[dict] = []
+    split = prepare_split(data, is_day_full, LB, FH, use_time_features=True)
     pred_rows: list[pd.DataFrame] = []
+    log_predictions = make_log_predictions(LB, FH, pred_rows)
 
-    def log_predictions(method: str, y_true: np.ndarray, y_pred: np.ndarray) -> None:
-        pred_rows.append(
-            pd.DataFrame(
-                {
-                    "Method": method,
-                    "LB_days": LB / 48,
-                    "FH_hours": FH * 0.5,
-                    "t_index": np.arange(len(y_true)),
-                    "y_true": np.asarray(y_true).ravel(),
-                    "y_pred": np.asarray(y_pred).ravel(),
-                }
-            )
-        )
-
-    # ---- Persistance P
-    y_pred_P = Persis_simple_test
-    rows.append(
-        build_metric_row(
-            "Persistence_P", LB, FH, Persis_simple_test, y_test, y_pred_P,
-            mask_day_test, extra_fields={"N_params": 0},
-        )
-    )
-    log_predictions("Persistence_P", y_test, y_pred_P)
-
-    # ---- Persistance cyclique
-    y_pred_Pc = predict_cyclic_persistence(
-        data, offset_base, n_test, T_period, fallback=y_pred_P
-    )
-    rows.append(
-        build_metric_row(
-            "Persistence_Pcyclic", LB, FH, Persis_simple_test, y_test, y_pred_Pc,
-            mask_day_test, extra_fields={"N_params": 0},
-        )
-    )
-    log_predictions("Persistence_Pcyclic", y_test, y_pred_Pc)
-
-    # ---- BLEND. La tranche de train se termine à idx_split + LB + FH - 1 (inclus)
-    data_tr_raw = data[: idx_split + LB + FH]
-    lam_phase = fit_blend_lambda_per_phase(data_tr_raw, FH, T_period)
-    y_pred_BL = predict_blend(y_pred_P, y_pred_Pc, lam_phase, offset_base, T_period)
-    print(
-        f"    [BLEND] lam_phase: min={lam_phase.min():.3f} "
-        f"max={lam_phase.max():.3f} mean={lam_phase.mean():.3f}"
-    )
-    rows.append(
-        build_metric_row(
-            "BLEND_opti", LB, FH, Persis_simple_test, y_test, y_pred_BL,
-            mask_day_test, extra_fields={"N_params": 0},
-        )
-    )
-    log_predictions("BLEND_opti", y_test, y_pred_BL)
+    # ---- Baselines P / P° / BLEND (shared with the ELM scripts)
+    rows = baseline_rows(data, LB, FH, split, log_predictions)
 
     # ---- AR-OLS
     print("  [AR_OLS]")
-    beta = train_ar_ols(X_train, y_train)
-    y_pred_ar = ar_predict(X_test, beta)
+    beta = train_ar_ols(split["X_train"], split["y_train"])
+    y_pred_ar = ar_predict(split["X_test"], beta)
     rows.append(
         build_metric_row(
-            "AR_OLS", LB, FH, Persis_simple_test, y_test, y_pred_ar,
-            mask_day_test, extra_fields={"N_params": beta.size},
+            "AR_OLS", LB, FH, split["Persis_simple_test"], split["y_test"], y_pred_ar,
+            split["mask_day_test"], extra_fields={"N_params": beta.size},
         )
     )
-    log_predictions("AR_OLS", y_test, y_pred_ar)
+    log_predictions("AR_OLS", split["y_test"], y_pred_ar)
 
     return rows, pred_rows
 
@@ -183,12 +92,12 @@ def run_one(
 # ============================================================================
 def main() -> None:
     data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
-    print(f"Donnees : {len(data)} points ({len(data)/48/365.25:.2f} ans)")
+    print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
 
     is_day_full = compute_is_day_mask(len(data))
     print(
-        f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} pas "
-        f"({is_day_full.mean()*100:.1f}% jour)"
+        f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} steps "
+        f"({is_day_full.mean()*100:.1f}% day)"
     )
 
     all_rows: list[dict] = []
@@ -206,16 +115,16 @@ def main() -> None:
         out_path_all=str(OUT_FILE_ALL),
         out_path_day=str(OUT_FILE_DAY),
     )
-    print("\n===== RESULTATS (tous les echantillons) =====")
+    print("\n===== RESULTS (all samples) =====")
     print(df_all.to_string())
-    print("\n===== RESULTATS (jour uniquement) =====")
+    print("\n===== RESULTS (day only) =====")
     print(df_day.to_string())
-    print(f"\nResultats _all : {OUT_FILE_ALL}")
-    print(f"Resultats _day : {OUT_FILE_DAY}")
+    print(f"\nResults _all : {OUT_FILE_ALL}")
+    print(f"Results _day : {OUT_FILE_DAY}")
 
     predictions = pd.concat(all_pred_rows, ignore_index=True)
     predictions.to_csv(PRED_FILE, index=False)
-    print(f"Predictions sauvegardees : {PRED_FILE}")
+    print(f"Predictions saved: {PRED_FILE}")
 
 
 if __name__ == "__main__":
