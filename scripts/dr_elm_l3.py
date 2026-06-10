@@ -21,10 +21,10 @@ Models reported per (LB, FH):
     - BLEND_opti : convex least-squares combination of the two persistences
     - ELM : ELM-L3 on [LB lags + 4 time features]
 """
-from math import floor, sqrt
+from math import sqrt
 import numpy as np
 
-from elm_common import VAL_RATIO, elm_sigmoid, ridge_solve, run_elm
+from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
 
 LAMBDA_GRID: list[float] = [10.0, 25.0]
@@ -56,40 +56,26 @@ def train_elm_l3(
     rng: np.random.Generator,
     lam_grid: list[float] | None = None,
     delta_grid: list[float] | None = None,
-    val_ratio: float = 0.20,
+    k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
-    in_size = X.shape[1]
-    n_train = X.shape[0]
-    n_fit = max(1, floor((1.0 - val_ratio) * n_train))
-    X_fit, X_val = X[:n_fit], X[n_fit:]
-    y_fit, y_val = y[:n_fit], y[n_fit:]
-
     lams = lam_grid if lam_grid else LAMBDA_GRID
     deltas = delta_grid if delta_grid else DELTA_GRID
 
-    best_val = np.inf
-    best_IW = best_bias = None
-    best_lam = best_delta = None
+    def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        lam, dlt = combo
+        beta = l3_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, lam, dlt)
+        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
-    for _ in range(n_candidates):
-        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
-        bias = rng.uniform(0.0, 1.0, size=n_hidden)
-        H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        H_val = elm_sigmoid(X_val @ IW.T + bias)
+    def refit(X_full, y_full, IW, bias, combo):
+        lam, dlt = combo
+        return l3_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, lam, dlt), None
 
-        for lam in lams:
-            for dlt in deltas:
-                beta = l3_solve(H_fit, y_fit, lam, dlt)
-                y_val_pred = np.clip(H_val @ beta, a_min=0.0, a_max=None)
-                val_rmse = sqrt(np.mean((y_val_pred - y_val) ** 2))
-                if val_rmse < best_val:
-                    best_val = val_rmse
-                    best_IW, best_bias = IW, bias
-                    best_lam, best_delta = lam, dlt
-
-    H_full = elm_sigmoid(X @ best_IW.T + best_bias)
-    best_beta = l3_solve(H_full, y, best_lam, best_delta)
-    return best_beta, best_IW, best_bias, best_lam, best_delta, best_val
+    combos = [(lam, dlt) for lam in lams for dlt in deltas]
+    beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
+        X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
+    )
+    return beta, IW, bias, combo[0], combo[1], best_val
 
 
 def train_elm_l3_grid(
@@ -107,7 +93,7 @@ def train_elm_l3_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, lam_sel, delta_sel, val_rmse = train_elm_l3(
                 X, y, n_hidden, n_candidates, rng,
-                lam_grid=LAMBDA_GRID, delta_grid=DELTA_GRID, val_ratio=VAL_RATIO,
+                lam_grid=LAMBDA_GRID, delta_grid=DELTA_GRID, k=CV_FOLDS,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "

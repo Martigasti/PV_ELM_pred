@@ -10,13 +10,21 @@ and several ELM variants are compared across multiple forecast horizons.
 ```
 python_prediction/
 ├── data/
-│   ├── PV_AC_20200801_20250706_Palaiseau.csv   # Raw data (AC power, 15-min steps)
-│   ├── data_30min.npy                          # Cache: series resampled to 30 min
-│   └── is_day_mask.npy                         # Cache: day/night mask (solar elevation > 0°)
+│   ├── Palaiseau/
+│   │   ├── PV_AC_20200801_20250706_Palaiseau.csv   # Raw data (AC power, 15-min steps)
+│   │   ├── data_30min.npy                          # Cache: series resampled to 30 min
+│   │   └── is_day_mask.npy                         # Cache: day/night mask (solar elevation > 0°)
+│   ├── cs/                                         # Oxelar + Signes datasets (raw CSV + 30-min cache + mask)
+│   ├── Solete/                                     # SOLETE dataset (DimRed_PAC_Solete.nc + 30-min cache + mask)
+│   └── Alice/                                      # Alice Springs dataset (DimRed_PAC_Alice.nc + 30-min cache + mask)
 ├── requirements.txt                            # Python dependencies
 ├── scripts/
 │   ├── observations.ipynb         # Exploration notebook / figures
-│   ├── preprocessing.py           # Builds data/data_30min.npy from the CSV
+│   ├── preprocessing.py           # Builds data/Palaiseau/data_30min.npy from the CSV
+│   ├── preprocessing_oxelar.py    # Builds data/cs/oxelar_30min.npy from the Oxelar CSV
+│   ├── preprocessing_signes.py    # Builds data/cs/signes_30min.npy from the Signes CSV (same structure as Oxelar)
+│   ├── preprocessing_nc.py        # Builds the 30-min cache for the NetCDF datasets (Solete, Alice), driven by DATASET
+│   ├── dataset_config.py          # Dataset selection via DATASET env var (Palaiseau/oxelar/signes/solete/alice)
 │   ├── run_full.py                # Entry point: runs all scripts in full mode
 │   ├── utils.py                   # Shared helpers: data loading, predictors, NICE metrics, day mask
 │   ├── elm_common.py              # Factored ELM core: config, elm_sigmoid, ridge_solve, generic run_elm runner
@@ -28,6 +36,7 @@ python_prediction/
 │   ├── dr_elm_robust_risk.py      # ELM Robust Risk (Ridge with lam = ε², bounded-uncertainty interpretation)
 │   ├── dr_elm_tikhonov.py         # Anisotropic Tikhonov ELM (penalty proportional to per-neuron energy)
 │   ├── dr_elm_box_cox.py          # Ridge ELM on Box-Cox-transformed target (shift c=1 W)
+│   ├── dr_elm_box_cox_rolling.py  # Box-Cox ELM, rolling refit each step over fixed windows {1m,6m,1y} (off run_full)
 │   ├── dr_elm_mae.py              # ELM-MAE (L1 loss, strict 2-pass, smoothing √(r²+δ²))
 │   ├── dr_elm_log_mse.py          # ELM-Log-MSE (log-quadratic loss, 2-pass, shift c grid)
 │   ├── dr_elm_huber.py            # ELM-Huber (Huber loss, 2-pass, adaptive δ via MAD)
@@ -38,6 +47,7 @@ python_prediction/
 │   ├── dr_elm_lp.py               # ELM-Lp (general L^p norm, p in (1,2)), 2-pass, joint grid (λ, p)
 │   ├── dr_elm_glm.py              # ELM-GLM linearised Fisher (Gamma + log link), 2-pass, joint grid (λ, c)
 │   ├── timegpt.py                 # TimeGPT (Nixtla foundation model, zero-shot; needs NIXTLA_API_KEY)
+│   ├── score_neural_prophet.py    # Score external NeuralProphet forecasts with benchmark metrics (NICE)
 │   ├── dr_elm_znocyclic_ols.py    # Ablation: ELM OLS without the 4 cyclic features (FH=1)
 │   ├── dr_elm_znocyclic_ridge.py  # Ablation: ELM Ridge without the 4 cyclic features (FH=1)
 │   └── dr_elm_znocyclic_rr.py     # Ablation: ELM Robust Risk without the 4 cyclic features (FH=1)
@@ -59,21 +69,38 @@ elevation and generate the day/night mask).
 ## Data preparation
 
 First, run **`preprocessing.py`** once. It reads the raw CSV, resamples to
-30-minute steps, and writes `data/data_30min.npy`. All scripts use this cache.
+30-minute steps, and writes `data/Palaiseau/data_30min.npy`. All scripts use this cache.
 
 ```bash
 python scripts/preprocessing.py
 ```
 
-The day/night mask (`data/is_day_mask.npy`) is generated automatically on the
+The day/night mask (`data/Palaiseau/is_day_mask.npy`) is generated automatically on the
 first call to `compute_is_day_mask` and cached to disk.
+
+### Other datasets
+
+The `DATASET` env var selects the series (default `Palaiseau`; also `oxelar`,
+`signes`, `solete`, `alice`), via `dataset_config.py`. Build each dataset's cache
+once with its preprocessing, then everything else is driven by `DATASET`:
+
+```bash
+DATASET=oxelar python scripts/preprocessing_oxelar.py   # Oxelar CSV
+DATASET=signes python scripts/preprocessing_signes.py   # Signes CSV
+DATASET=solete python scripts/preprocessing_nc.py       # SOLETE NetCDF
+DATASET=alice  python scripts/preprocessing_nc.py       # Alice NetCDF
+```
+
+NetCDF datasets (Solete, Alice) require `xarray` + `netCDF4` and have no CSV
+fallback, so their cache must be built first.
 
 ## Running the models
 
-### Run all models (full mode, 2 years of data)
+### Run all models (full mode)
 
 ```bash
-python scripts/run_full.py
+python scripts/run_full.py                       # default dataset (Palaiseau)
+DATASET=solete python scripts/run_full.py   # results land in results/Solete/
 ```
 
 ### Run a specific model
@@ -149,7 +176,7 @@ CORR_BANDED=0 python scripts/run_full.py corr   # full mode + dense C
 | ELM (Tikhonov)      | Anisotropic Ridge: penalty $\propto$ energy of each hidden neuron            |
 | ELM (Box-Cox)       | Ridge on Box-Cox-transformed target $P_{AC}$; two hyperparams ($\lambda_r$, $\lambda_{bc}$) |
 | ELM (MAE)           | $L^1$ cost $\|H\beta - y\|_1$, strict 2-pass: Pass 1 Ridge init, Pass 2 a single weighted solve with smoothing $\sqrt{r^2 + \delta^2}$; joint grid $(\lambda, \delta)$ |
-| ELM (Log-MSE)       | Cost $\|\log(H\beta + c) - \log(y + c)\|^2 + \lambda\|\beta\|^2$, strict 2-pass: Pass 1 Ridge on $\log(y + c)$, Pass 2 a single linearised solve, $c = 1$ W |
+| ELM (Log-MSE)       | Cost $\|\log(H\beta + c) - \log(y + c)\|^2 + \lambda\|\beta\|^2$ with $\beta$ in **log space** (deviation from PDF §A.2): closed-form Ridge on $z = \log(y + c)$, $\hat y = \exp(H\beta) - c$. The PDF's literal 2-pass ($\beta$ in original space) collapses to $\sim 0$ on PV data. Grid $(\lambda, c)$ |
 | ELM (Huber)         | Huber cost $\rho_\delta$ (quadratic near 0, linear beyond), strict 2-pass: Pass 1 Ridge init, Pass 2 a single weighted solve with $W = \min(1, \delta / \lvert r^{(0)}\rvert)$, $\delta = 1.345 \cdot \mathrm{MAD}(r^{(0)})$ |
 | ELM (L3)            | Cubic-norm cost $\sum_i \lvert r_i\rvert^3$ (upweights large residuals, opposite of MAE/Huber), strict 2-pass: Pass 1 Ridge init, Pass 2 a single weighted solve with $W = \mathrm{diag}\big(\sqrt{(r^{(0)})^2 + \delta^2}\big)$; joint grid $(\lambda, \delta)$ |
 | ELM (Corr)          | GLS with stationary temporal correlation $C_{ij} = \exp(-\lvert t_i - t_j\rvert / \tau)$ on residuals: $\beta = (H^\top C H + \sigma^2 I)^{-1} H^\top C Y$. Closed-form, joint grid $(\sigma^2, \tau)$ |
@@ -158,6 +185,7 @@ CORR_BANDED=0 python scripts/run_full.py corr   # full mode + dense C
 | ELM ($L_p$)         | General $L^p$ norm cost $\sum_i \lvert r_i\rvert^p + \lambda\lVert\beta\rVert_2^2$ with $p \in (1,2)$, strict 2-pass: Pass 1 Ridge init, Pass 2 a single weighted solve with $W_p = \mathrm{diag}(\lvert r^{(0)}\rvert^{p-2})$ (floor at $\varepsilon$ to avoid division by zero); joint grid $(\lambda, p)$ |
 | ELM (GLM)           | Linearised GLM (Fisher scoring, one step) with Gamma + log link: $g(\mu) = \log\mu$, $\mathrm{Var}(Y) \propto \mu^2$. Strict 2-pass: Pass 1 Ridge on $y$, Pass 2 a single weighted solve with adjusted variable $z = \log(\hat\mu) + (y + c - \hat\mu)/\hat\mu$ and weights $W_\eta = \mathrm{diag}(\hat\mu^2)$. $\beta$ lives in log-space, $\hat y = \exp(H\beta) - c$. Joint grid $(\lambda, c)$ |
 | TimeGPT             | Nixtla foundation model, zero-shot inference (no training, no exogenous features). 1 API call per window covering $h_{\max}$, subsampled at `STRIDE` to fit free-tier quotas. Requires `pip install nixtla` and `NIXTLA_API_KEY` |
+| NeuralProphet       | External model (forecasts supplied by a teammate), scored a posteriori with the benchmark metrics (NICE) via `score_neural_prophet.py`. Two variants: with / without daily seasonality |
 
 All models share the same inputs (lookback window of $LB=48$ lags +
 sin/cos features for the hour of day and day of year) and the same

@@ -26,7 +26,7 @@ from elm_common import (
     Ndata,
     RESULTS_DIR,
     baseline_rows,
-    compute_is_day_mask,
+    day_mask,
     load_30min,
     make_log_predictions,
     prepare_split,
@@ -94,7 +94,7 @@ def main() -> None:
     data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
     print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
 
-    is_day_full = compute_is_day_mask(len(data))
+    is_day_full = day_mask(len(data))
     print(
         f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} steps "
         f"({is_day_full.mean()*100:.1f}% day)"

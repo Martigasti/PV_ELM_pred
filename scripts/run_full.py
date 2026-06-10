@@ -27,7 +27,7 @@ Usage:
 
 Prerequisites:
     Run `python scripts/preprocessing.py` once. This writes
-    `data/data_30min.npy`, which all the scripts pick up via their
+    `data/Palaiseau/data_30min.npy`, which all the scripts pick up via their
     `load_30min(...)`.
 """
 
@@ -38,7 +38,11 @@ import time
 
 HERE         = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
-CACHE_NPY    = os.path.join(PROJECT_ROOT, 'data', 'data_30min.npy')
+
+# Cache path follows the selected dataset (env var DATASET) so the
+# "cache missing" pre-check below is correct for any series.
+sys.path.insert(0, HERE)
+from dataset_config import CACHE_NPY  # noqa: E402
 
 SCRIPTS = {
     'blend_opt'  : 'blend_optimisation.py',
@@ -79,9 +83,13 @@ def run_one(name: str) -> None:
 
 def main() -> None:
     if not os.path.exists(CACHE_NPY):
-        print(f'WARNING: {CACHE_NPY} not found.')
-        print('            Run python scripts/preprocessing.py first to build the cache.')
-        print('            Falling back to internal CSV resampling (slower).')
+        from dataset_config import DATASET, NC_FILE
+        print(f'WARNING: {CACHE_NPY} not found (DATASET={DATASET}).')
+        if NC_FILE is not None:
+            print('            Run `python scripts/preprocessing_nc.py` first '
+                  '(NetCDF dataset, no CSV fallback).')
+        else:
+            print('            Run the dataset preprocessing first to build the cache.')
 
     targets = sys.argv[1:] or list(SCRIPTS.keys())
     bad = [t for t in targets if t not in SCRIPTS]

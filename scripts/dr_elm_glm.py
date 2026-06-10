@@ -28,10 +28,10 @@ Models reported per (LB, FH):
 from math import floor, sqrt
 import numpy as np
 
-from elm_common import VAL_RATIO, elm_sigmoid, ridge_solve, run_elm
+from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
 
-LAMBDA_GRID: list[float] = [10.0, 25.0]
+LAMBDA_GRID: list[float] = [25.0]
 C_GRID: list[float] = [0.1, 1.0, 10.0, 100.0]
 EPS_MU: float = 1e-3  # floor on mu_hat before log
 
@@ -81,38 +81,26 @@ def train_elm_glm(
     rng: np.random.Generator,
     lam_grid: list[float] | None = None,
     c_grid: list[float] | None = None,
-    val_ratio: float = 0.20,
+    k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
-    in_size = X.shape[1]
-    n_train = X.shape[0]
-    n_fit = max(1, floor((1.0 - val_ratio) * n_train))
-    X_fit, X_val = X[:n_fit], X[n_fit:]
-    y_fit, y_val = y[:n_fit], y[n_fit:]
-
     grid_l = lam_grid if lam_grid else LAMBDA_GRID
     grid_c = c_grid if c_grid else C_GRID
 
-    best_val, best_lam, best_c_shift, best_IW, best_bias = np.inf, None, None, None, None
+    def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        lam, c_val = combo
+        beta = glm_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, lam, c_val)
+        y_val_pred = glm_predict_raw(elm_sigmoid(X_val @ IW.T + bias), beta, c_val)
+        return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
-    for _ in range(n_candidates):
-        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
-        bias = rng.uniform(0.0, 1.0, size=n_hidden)
-        H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        H_val = elm_sigmoid(X_val @ IW.T + bias)
+    def refit(X_full, y_full, IW, bias, combo):
+        lam, c_val = combo
+        return glm_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, lam, c_val), None
 
-        for l in grid_l:
-            for c_val in grid_c:
-                beta = glm_solve(H_fit, y_fit, l, c_val)
-                y_val_pred = glm_predict_raw(H_val, beta, c_val)
-                val_rmse = sqrt(np.mean((y_val_pred - y_val) ** 2))
-                if val_rmse < best_val:
-                    best_val = val_rmse
-                    best_lam, best_c_shift = l, c_val
-                    best_IW, best_bias = IW, bias
-
-    H_full = elm_sigmoid(X @ best_IW.T + best_bias)
-    best_beta = glm_solve(H_full, y, best_lam, best_c_shift)
-    return best_beta, best_IW, best_bias, best_lam, best_c_shift, best_val
+    combos = [(l, c_val) for l in grid_l for c_val in grid_c]
+    beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
+        X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
+    )
+    return beta, IW, bias, combo[0], combo[1], best_val
 
 
 def train_elm_glm_grid(
@@ -129,7 +117,7 @@ def train_elm_glm_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, lam_sel, c_sel, val_rmse = train_elm_glm(
                 X, y, n_hidden, n_candidates, rng,
-                lam_grid=LAMBDA_GRID, c_grid=C_GRID, val_ratio=VAL_RATIO,
+                lam_grid=LAMBDA_GRID, c_grid=C_GRID, k=CV_FOLDS,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "

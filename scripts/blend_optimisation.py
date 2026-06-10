@@ -13,14 +13,13 @@ rather than derived from the correlation structure (see blend_correlation.py).
 import os
 import time
 from math import floor
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from dataset_config import CACHE_NPY, CSV_FILE, NDATA_FULL, RESULTS_DIR, day_mask
 from utils import (
     build_metric_row,
-    compute_is_day_mask,
     load_30min,
     predict_blend,
     predict_cyclic_persistence,
@@ -43,16 +42,12 @@ if SMOKE_TEST:
     T_period = 48
 else:
     print("*** FULL MODE ***")
-    Ndata    = round(2 * 365.25 * 48)
+    Ndata    = NDATA_FULL
     LB_list  = [48]
     FH_list  = [1, 2, 6, 12, 20]
     ratio    = 0.50
     T_period = 48
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CSV_FILE = PROJECT_ROOT / "data" / "PV_AC_20200801_20250706_Palaiseau.csv"
-CACHE_NPY = PROJECT_ROOT / "data" / "data_30min.npy"
-RESULTS_DIR = PROJECT_ROOT / "results"
 OUT_FILE_ALL = RESULTS_DIR / "Results_BLEND_optimisation_all.csv"
 OUT_FILE_DAY = RESULTS_DIR / "Results_BLEND_optimisation_day.csv"
 PRED_FILE = RESULTS_DIR / "Predictions_BLEND_optimisation.csv"
@@ -181,7 +176,7 @@ def main() -> None:
     data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
     print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
 
-    is_day_full = compute_is_day_mask(len(data))
+    is_day_full = day_mask(len(data))
     print(
         f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} steps "
         f"({is_day_full.mean()*100:.1f}% day)"

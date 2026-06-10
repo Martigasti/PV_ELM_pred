@@ -13,7 +13,7 @@ import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
-DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
+DATA_DIR = os.path.join(PROJECT_ROOT, 'data', 'Palaiseau')
 CSV_FILE = os.path.join(DATA_DIR, 'PV_AC_20200801_20250706_Palaiseau.csv')
 CACHE_NPY = os.path.join(DATA_DIR, 'data_30min.npy')
 

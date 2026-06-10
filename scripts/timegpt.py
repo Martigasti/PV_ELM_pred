@@ -22,15 +22,14 @@ Prerequisites:
 import os
 import time
 from math import floor
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from blend_optimisation import fit_blend_lambda_per_phase
+from dataset_config import CACHE_NPY, CSV_FILE, NDATA_FULL, RESULTS_DIR, day_mask
 from utils import (
     build_metric_row,
-    compute_is_day_mask,
     load_30min,
     predict_blend,
     predict_cyclic_persistence,
@@ -54,22 +53,18 @@ if SMOKE_TEST:
     STRIDE   = 50          # 1 window out of 50
 else:
     print("*** FULL MODE ***")
-    Ndata    = round(2 * 365.25 * 48)
+    Ndata    = NDATA_FULL
     LB_list  = [48]
     FH_list  = [1, 2, 6, 12, 20]
     ratio    = 0.50
     T_period = 48
-    STRIDE   = 20          # 1 window out of 20 (~875 calls for 17,500 test pts)
+    STRIDE   = 5          # 1 window out of 20 (~875 calls for 17,500 test pts)
 
 # Start date of the dataset (first point at 00:00 UTC per the file name).
 START_TIMESTAMP = "2020-08-01 00:00:00"
 FREQ            = "30min"
 TIMEGPT_MODEL   = "timegpt-1"   # alternatives: "timegpt-1-long-horizon"
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CSV_FILE  = PROJECT_ROOT / "data" / "PV_AC_20200801_20250706_Palaiseau.csv"
-CACHE_NPY = PROJECT_ROOT / "data" / "data_30min.npy"
-RESULTS_DIR = PROJECT_ROOT / "results"
 OUT_FILE_ALL = RESULTS_DIR / "Results_TimeGPT_NICE_simple_all.csv"
 OUT_FILE_DAY = RESULTS_DIR / "Results_TimeGPT_NICE_simple_day.csv"
 PRED_FILE    = RESULTS_DIR / "Predictions_TimeGPT_NICE_simple.csv"
@@ -97,24 +92,94 @@ def get_timegpt_client():
     return NixtlaClient(api_key=api_key)
 
 
+# Per-call retry on transient network errors (DNS drop, 408/timeout, conn reset).
+# WSL2 connections to the Nixtla API drop intermittently; without this a single
+# blip after ~1h of calls kills the whole run.
+_MAX_CALL_RETRIES = 6
+_BACKOFF_BASE_S = 2.0          # 2,4,8,16,32,64 s
+_CKPT_EVERY = 25               # flush checkpoint to disk every N windows
+
+
+def _ckpt_paths(sig: str):
+    """Checkpoint files keyed by a run signature (invalidated if params change)."""
+    stem = RESULTS_DIR / f".timegpt_ckpt_{sig}"
+    return stem.with_suffix(".preds.npy"), stem.with_suffix(".done.npy")
+
+
+def _forecast_one(client, hist, t0, h):
+    """One TimeGPT call, retried on transient network errors with backoff.
+
+    Raises the last exception if all retries are exhausted (caller checkpoints
+    and exits cleanly so a re-run resumes)."""
+    ts = pd.date_range(start=t0, periods=len(hist), freq=FREQ)
+    df = pd.DataFrame({"ds": ts, "y": hist, "unique_id": "PAC"})
+    last_exc = None
+    for attempt in range(_MAX_CALL_RETRIES):
+        try:
+            fcst = client.forecast(df=df, h=h, freq=FREQ, model=TIMEGPT_MODEL)
+            return fcst["TimeGPT"].to_numpy()
+        except Exception as exc:  # network/HTTP errors from httpx/nixtla
+            last_exc = exc
+            wait = _BACKOFF_BASE_S * (2 ** attempt)
+            print(f"      [retry {attempt+1}/{_MAX_CALL_RETRIES}] {type(exc).__name__}: "
+                  f"{exc} — waiting {wait:.0f}s")
+            time.sleep(wait)
+    raise last_exc
+
+
 def timegpt_forecast_batch(
-    client, histories: list[np.ndarray], start_ts_list: list[pd.Timestamp], h: int
+    client, histories: list[np.ndarray], start_ts_list: list[pd.Timestamp], h: int,
+    sig: str = "default",
 ) -> np.ndarray:
     """Predict h steps for each history window. Returns (n_windows, h).
 
     Each forecast call is independent: a single series is passed per window
     with its absolute timestamp (so that TimeGPT picks up the correct seasonal
     features: hour of the day, day of the year).
+
+    Resumable: predictions are checkpointed to disk as they complete. If the
+    network drops and per-call retries are exhausted, the checkpoint is saved
+    and the script exits cleanly — re-running resumes from the last saved
+    window (no lost API calls). `sig` keys the checkpoint to the run params.
     """
     n = len(histories)
-    out = np.empty((n, h))
+    preds_path, done_path = _ckpt_paths(sig)
+
+    if preds_path.exists() and done_path.exists():
+        out = np.load(preds_path)
+        done = np.load(done_path)
+        if out.shape == (n, h) and done.shape == (n,):
+            print(f"    TimeGPT : resuming from checkpoint "
+                  f"({int(done.sum())}/{n} windows already done)")
+        else:  # stale checkpoint (params changed) → start fresh
+            out, done = np.full((n, h), np.nan), np.zeros(n, dtype=bool)
+    else:
+        out, done = np.full((n, h), np.nan), np.zeros(n, dtype=bool)
+
+    def _flush():
+        np.save(preds_path, out)
+        np.save(done_path, done)
+
     for i, (hist, t0) in enumerate(zip(histories, start_ts_list)):
-        ts = pd.date_range(start=t0, periods=len(hist), freq=FREQ)
-        df = pd.DataFrame({"ds": ts, "y": hist, "unique_id": "PAC"})
-        fcst = client.forecast(df=df, h=h, freq=FREQ, model=TIMEGPT_MODEL)
-        out[i] = fcst["TimeGPT"].to_numpy()
+        if done[i]:
+            continue
+        try:
+            out[i] = _forecast_one(client, hist, t0, h)
+        except Exception as exc:
+            _flush()
+            done_n = int(done.sum())
+            raise SystemExit(
+                f"\nNetwork failure at window {i+1}/{n} after retries: {exc}\n"
+                f"Checkpoint saved ({done_n}/{n} done). Re-run the SAME command "
+                f"to resume from window {done_n+1}."
+            ) from exc
+        done[i] = True
+        if (i + 1) % _CKPT_EVERY == 0:
+            _flush()
         if (i + 1) % 50 == 0:
             print(f"    TimeGPT : {i+1}/{n} windows processed")
+
+    _flush()
     return np.clip(out, a_min=0.0, a_max=None)
 
 
@@ -216,7 +281,7 @@ def main() -> None:
     print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
     start_dt = pd.Timestamp(START_TIMESTAMP)
 
-    is_day_full = compute_is_day_mask(len(data))
+    is_day_full = day_mask(len(data))
     print(
         f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} steps "
         f"({is_day_full.mean()*100:.1f}% day)"
@@ -239,7 +304,12 @@ def main() -> None:
 
     histories = [data[k - LB : k] for k in k_values]
     start_ts_list = [start_dt + pd.Timedelta(minutes=30 * (k - LB)) for k in k_values]
-    timegpt_preds = timegpt_forecast_batch(client, histories, start_ts_list, h_max)
+    # Signature keys the resume-checkpoint to the run params: changing Ndata,
+    # stride, LB, horizon or window count starts a fresh checkpoint.
+    sig = f"N{n_total}_s{STRIDE}_LB{LB}_h{h_max}_w{len(k_values)}"
+    timegpt_preds = timegpt_forecast_batch(
+        client, histories, start_ts_list, h_max, sig=sig,
+    )
     # timegpt_idx[j] = absolute index of the 1st prediction (= k_values[j])
     timegpt_idx = k_values.astype(int)
 
@@ -270,6 +340,10 @@ def main() -> None:
     predictions = pd.concat(all_pred_rows, ignore_index=True)
     predictions.to_csv(PRED_FILE, index=False)
     print(f"Predictions saved: {PRED_FILE}")
+
+    # Results are durably saved → drop the resume-checkpoint.
+    for p in _ckpt_paths(sig):
+        p.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

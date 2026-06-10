@@ -25,10 +25,10 @@ Models reported per (LB, FH):
     - ELM : Corr-ELM on [LB lags + 4 time features]
 """
 import os
-from math import floor, sqrt
+from math import sqrt
 import numpy as np
 
-from elm_common import VAL_RATIO, elm_sigmoid, run_elm
+from elm_common import CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
 
 
 SIGMA2_GRID: list[float] = [10.0, 25.0]
@@ -84,6 +84,17 @@ def corr_solve_from_precomputed(
     return np.linalg.solve(HtCH + sigma2 * np.eye(n_hidden), HtCy)
 
 
+def _apply_C(M: np.ndarray, tau: float) -> np.ndarray:
+    """Apply the stationary correlation operator C(tau) to M (rows = contiguous
+    time steps). Banded approximation by default, dense if CORR_BANDED is off.
+    The dense matrix is sized to len(M), so it stays valid on any contiguous
+    slice (an expanding-window CV fit set or the whole train set)."""
+    if CORR_BANDED:
+        return banded_matmul(M, tau, band_halfwidth(tau, STEP_HOURS, BAND_MULT), STEP_HOURS)
+    C = build_C_dense(M.shape[0], tau, STEP_HOURS)
+    return (C @ M.astype(np.float32)).astype(np.float64)
+
+
 def train_elm_corr(
     X: np.ndarray,
     y: np.ndarray,
@@ -92,65 +103,34 @@ def train_elm_corr(
     rng: np.random.Generator,
     sigma2_grid: list[float] | None = None,
     tau_grid: list[float] | None = None,
-    val_ratio: float = 0.20,
+    k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
-    """Select (IW, bias, sigma^2, tau) by validation RMSE, refit on the full train set."""
-    in_size = X.shape[1]
-    n_train = X.shape[0]
-    n_fit = max(1, floor((1.0 - val_ratio) * n_train))
-    X_fit, X_val = X[:n_fit], X[n_fit:]
-    y_fit, y_val = y[:n_fit], y[n_fit:]
-
+    """Select (IW, bias, sigma^2, tau) by temporal CV, refit on the full train set."""
     s_grid = sigma2_grid if sigma2_grid else SIGMA2_GRID
     t_grid = tau_grid if tau_grid else TAU_GRID
 
-    def apply_C(M: np.ndarray, tau: float, C_dense: np.ndarray | None) -> np.ndarray:
-        if CORR_BANDED:
-            K = band_halfwidth(tau, STEP_HOURS, BAND_MULT)
-            return banded_matmul(M, tau, K, STEP_HOURS)
-        return (C_dense @ M.astype(np.float32)).astype(np.float64)
-
-    # Dense mode: C depends only on tau, built once per tau.
-    # Banded mode: no stored matrix, C @ M is computed on the fly.
-    C_by_tau: dict[float, np.ndarray | None] = {}
-    for tau in t_grid:
-        C_by_tau[tau] = None if CORR_BANDED else build_C_dense(n_fit, tau, STEP_HOURS)
-
-    best_val, best_sigma2, best_tau = np.inf, None, None
-    best_IW, best_bias = None, None
-
-    for _ in range(n_candidates):
-        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
-        bias = rng.uniform(0.0, 1.0, size=n_hidden)
+    def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        tau, sigma2 = combo
         H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        H_val = elm_sigmoid(X_val @ IW.T + bias)
+        HtCH = H_fit.T @ _apply_C(H_fit, tau)
+        HtCy = H_fit.T @ _apply_C(y_fit, tau)
+        beta = corr_solve_from_precomputed(HtCH, HtCy, sigma2)
+        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
-        for tau in t_grid:
-            C_dense = C_by_tau[tau]
-            CH = apply_C(H_fit, tau, C_dense)
-            Cy = apply_C(y_fit, tau, C_dense)
-            HtCH = H_fit.T @ CH
-            HtCy = H_fit.T @ Cy
-            for sigma2 in s_grid:
-                beta = corr_solve_from_precomputed(HtCH, HtCy, sigma2)
-                y_val_pred = np.clip(H_val @ beta, a_min=0.0, a_max=None)
-                val_rmse = sqrt(np.mean((y_val_pred - y_val) ** 2))
-                if val_rmse < best_val:
-                    best_val = val_rmse
-                    best_sigma2, best_tau = sigma2, tau
-                    best_IW, best_bias = IW, bias
+    def refit(X_full, y_full, IW, bias, combo):
+        tau, sigma2 = combo
+        H_full = elm_sigmoid(X_full @ IW.T + bias)
+        HtCH = H_full.T @ _apply_C(H_full, tau)
+        HtCy = H_full.T @ _apply_C(y_full, tau)
+        return corr_solve_from_precomputed(HtCH, HtCy, sigma2), None
 
-    # Refit on the full train set with (sigma2*, tau*).
-    H_full = elm_sigmoid(X @ best_IW.T + best_bias)
-    if CORR_BANDED:
-        CH = banded_matmul(H_full, best_tau, band_halfwidth(best_tau), STEP_HOURS)
-        Cy = banded_matmul(y, best_tau, band_halfwidth(best_tau), STEP_HOURS)
-    else:
-        C_full = build_C_dense(X.shape[0], best_tau, STEP_HOURS)
-        CH = (C_full @ H_full.astype(np.float32)).astype(np.float64)
-        Cy = (C_full @ y.astype(np.float32)).astype(np.float64)
-    best_beta = corr_solve_from_precomputed(H_full.T @ CH, H_full.T @ Cy, best_sigma2)
-    return best_beta, best_IW, best_bias, best_sigma2, best_tau, best_val
+    combos = [(tau, sigma2) for tau in t_grid for sigma2 in s_grid]
+    beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
+        X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
+    )
+    best_tau, best_sigma2 = combo
+    return beta, IW, bias, best_sigma2, best_tau, best_val
 
 
 def train_elm_corr_grid(
@@ -167,7 +147,7 @@ def train_elm_corr_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, sigma2_sel, tau_sel, val_rmse = train_elm_corr(
                 X, y, n_hidden, n_candidates, rng,
-                sigma2_grid=SIGMA2_GRID, tau_grid=TAU_GRID, val_ratio=VAL_RATIO,
+                sigma2_grid=SIGMA2_GRID, tau_grid=TAU_GRID, k=CV_FOLDS,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "

@@ -16,18 +16,19 @@ Models reported per (LB, FH):
     - BLEND_opti : convex least-squares combination of the two persistences
     - ELM : Ridge ELM on [LB lags + 4 time features]
 """
-from math import floor, sqrt
+from math import sqrt
 import numpy as np
 
 from elm_common import (
-    VAL_RATIO,
+    CV_FOLDS,
     elm_sigmoid,
     ridge_solve,
     run_elm,
+    select_by_temporal_cv,
 )
 
 
-LAMBDA_GRID: list[float] = [10.0, 25.0]
+LAMBDA_GRID: list[float] = [1.0, 10.0, 25.0]
 
 
 # ============================================================================
@@ -40,33 +41,26 @@ def train_elm_ridge(
     n_candidates: int,
     rng: np.random.Generator,
     lam_grid: list[float],
-    val_ratio: float = 0.20,
+    k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
-    """Select (IW, bias, lambda) by validation RMSE, then refit beta on the full train set."""
-    in_size = X.shape[1]
-    n_train = X.shape[0]
-    n_fit = max(1, floor((1.0 - val_ratio) * n_train))
-    X_fit, X_val = X[:n_fit], X[n_fit:]
-    y_fit, y_val = y[:n_fit], y[n_fit:]
-
-    best_val, best_lam, best_IW, best_bias = np.inf, None, None, None
-
-    for _ in range(n_candidates):
-        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
-        bias = rng.uniform(0.0, 1.0, size=n_hidden)
+    """Select (IW, bias, lambda) by temporal CV, then refit beta on the full train set."""
+    def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        (lam,) = combo
         H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        H_val = elm_sigmoid(X_val @ IW.T + bias)
+        beta = ridge_solve(H_fit, y_fit, lam)
+        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
-        for l in lam_grid:
-            beta = ridge_solve(H_fit, y_fit, l)
-            y_val_pred = np.clip(H_val @ beta, a_min=0.0, a_max=None)
-            val_rmse = sqrt(np.mean((y_val_pred - y_val) ** 2))
-            if val_rmse < best_val:
-                best_val, best_lam, best_IW, best_bias = val_rmse, l, IW, bias
+    def refit(X_full, y_full, IW, bias, combo):
+        (lam,) = combo
+        H_full = elm_sigmoid(X_full @ IW.T + bias)
+        return ridge_solve(H_full, y_full, lam), None
 
-    H_full = elm_sigmoid(X @ best_IW.T + best_bias)
-    best_beta = ridge_solve(H_full, y, best_lam)
-    return best_beta, best_IW, best_bias, best_lam, best_val
+    combos = [(lam,) for lam in lam_grid]
+    beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
+        X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
+    )
+    return beta, IW, bias, combo[0], best_val
 
 
 def train_elm_ridge_grid(
@@ -83,7 +77,7 @@ def train_elm_ridge_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, lam_sel, val_rmse = train_elm_ridge(
                 X, y, n_hidden, n_candidates, rng,
-                lam_grid=LAMBDA_GRID, val_ratio=VAL_RATIO,
+                lam_grid=LAMBDA_GRID, k=CV_FOLDS,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "

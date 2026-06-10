@@ -15,12 +15,12 @@ Models reported per (LB, FH):
     - BLEND_opti : convex least-squares combination of the two persistences
     - ELM : ELM Robust Risk on [LB lags + 4 time features]
 """
-from math import floor, sqrt
+from math import sqrt
 
 import numpy as np
 
 # The common part (config, baselines, runner) lives in elm_common.
-from elm_common import VAL_RATIO, elm_sigmoid, run_elm
+from elm_common import CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
 
 
 EPS_GRID: list[float] = [1e-2, 0.1, 0, sqrt(10), 5.0, 10]
@@ -44,33 +44,24 @@ def train_elm_robust_risk(
     n_candidates: int,
     rng: np.random.Generator,
     eps_grid: list[float],
-    val_ratio: float = 0.20,
+    k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
-    """Select (IW, bias, eps) by validation RMSE, then refit beta on the full train set."""
-    in_size = X.shape[1]
-    n_train = X.shape[0]
-    n_fit = max(1, floor((1.0 - val_ratio) * n_train))
-    X_fit, X_val = X[:n_fit], X[n_fit:]
-    y_fit, y_val = y[:n_fit], y[n_fit:]
+    """Select (IW, bias, eps) by temporal CV, then refit beta on the full train set."""
+    def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        (eps,) = combo
+        beta = robust_risk_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, eps)
+        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
-    best_val, best_eps, best_IW, best_bias = np.inf, None, None, None
+    def refit(X_full, y_full, IW, bias, combo):
+        (eps,) = combo
+        return robust_risk_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, eps), None
 
-    for _ in range(n_candidates):
-        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
-        bias = rng.uniform(0.0, 1.0, size=n_hidden)
-        H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        H_val = elm_sigmoid(X_val @ IW.T + bias)
-
-        for e in eps_grid:
-            beta = robust_risk_solve(H_fit, y_fit, e)
-            y_val_pred = np.clip(H_val @ beta, a_min=0.0, a_max=None)
-            val_rmse = sqrt(np.mean((y_val_pred - y_val) ** 2))
-            if val_rmse < best_val:
-                best_val, best_eps, best_IW, best_bias = val_rmse, e, IW, bias
-
-    H_full = elm_sigmoid(X @ best_IW.T + best_bias)
-    best_beta = robust_risk_solve(H_full, y, best_eps)
-    return best_beta, best_IW, best_bias, best_eps, best_val
+    combos = [(e,) for e in eps_grid]
+    beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
+        X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
+    )
+    return beta, IW, bias, combo[0], best_val
 
 
 def train_elm_robust_risk_grid(
@@ -87,7 +78,7 @@ def train_elm_robust_risk_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, eps_sel, val_rmse = train_elm_robust_risk(
                 X, y, n_hidden, n_candidates, rng,
-                eps_grid=EPS_GRID, val_ratio=VAL_RATIO,
+                eps_grid=EPS_GRID, k=CV_FOLDS,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "

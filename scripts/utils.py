@@ -134,26 +134,36 @@ LON_PALAISEAU = 2.2188
 # The mask is cached on first computation.
 _DEBUT_SERIE_UTC = "2020-08-01 00:00:00"
 _FREQ = "30min"
-_MASK_CACHE_NPY = Path(__file__).resolve().parent.parent / "data" / "is_day_mask.npy"
+_MASK_CACHE_NPY = Path(__file__).resolve().parent.parent / "data" / "Palaiseau" / "is_day_mask.npy"
 
 
-def compute_is_day_mask(n_steps: int, elevation_threshold_deg: float = 0.0) -> np.ndarray:
+def compute_is_day_mask(
+    n_steps: int,
+    elevation_threshold_deg: float = 0.0,
+    latitude: float = LAT_PALAISEAU,
+    longitude: float = LON_PALAISEAU,
+    start_utc: str = _DEBUT_SERIE_UTC,
+    cache_path: Path = _MASK_CACHE_NPY,
+) -> np.ndarray:
     """Boolean array, True where the sun > threshold over the 30-min slot.
 
+    Defaults to Palaiseau (lat/lon/start date) for backward compatibility.
+    Pass latitude/longitude/start_utc/cache_path to use another site (e.g.
+    Oxelar), with a distinct cache file so masks do not overwrite each other.
     Cached on disk so the pvlib call is paid only once per N.
     """
-    if _MASK_CACHE_NPY.exists():
-        cached = np.load(_MASK_CACHE_NPY)
+    if cache_path.exists():
+        cached = np.load(cache_path)
         if cached.size >= n_steps:
             return cached[:n_steps]
 
-    times = pd.date_range(_DEBUT_SERIE_UTC, periods=n_steps, freq=_FREQ, tz="UTC")
+    times = pd.date_range(start_utc, periods=n_steps, freq=_FREQ, tz="UTC")
     sp = pvlib.solarposition.get_solarposition(
-        times, latitude=LAT_PALAISEAU, longitude=LON_PALAISEAU
+        times, latitude=latitude, longitude=longitude
     )
     mask = sp["elevation"].to_numpy() > elevation_threshold_deg
     try:
-        np.save(_MASK_CACHE_NPY, mask)
+        np.save(cache_path, mask)
     except OSError:
         pass
     return mask

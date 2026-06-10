@@ -22,10 +22,10 @@ Models reported per (LB, FH):
     - BLEND_opti : convex least-squares combination of the two persistences
     - ELM : ELM-Huber on [LB lags + 4 time features]
 """
-from math import floor, sqrt
+from math import sqrt
 import numpy as np
 
-from elm_common import VAL_RATIO, elm_sigmoid, ridge_solve, run_elm
+from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
 
 HUBER_K: float = 1.345
@@ -74,38 +74,25 @@ def train_elm_huber(
     n_candidates: int,
     rng: np.random.Generator,
     lam_grid: list[float] | None = None,
-    val_ratio: float = 0.20,
+    k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
-    in_size = X.shape[1]
-    n_train = X.shape[0]
-    n_fit = max(1, floor((1.0 - val_ratio) * n_train))
-    X_fit, X_val = X[:n_fit], X[n_fit:]
-    y_fit, y_val = y[:n_fit], y[n_fit:]
-
     lams = lam_grid if lam_grid else LAMBDA_GRID
 
-    best_val = np.inf
-    best_IW = best_bias = None
-    best_lam = best_delta = None
+    def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        (lam,) = combo
+        beta, _ = huber_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, lam)
+        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
-    for _ in range(n_candidates):
-        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
-        bias = rng.uniform(0.0, 1.0, size=n_hidden)
-        H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        H_val = elm_sigmoid(X_val @ IW.T + bias)
+    def refit(X_full, y_full, IW, bias, combo):
+        (lam,) = combo
+        return huber_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, lam)  # (beta, delta)
 
-        for lam in lams:
-            beta, delta = huber_solve(H_fit, y_fit, lam)
-            y_val_pred = np.clip(H_val @ beta, a_min=0.0, a_max=None)
-            val_rmse = sqrt(np.mean((y_val_pred - y_val) ** 2))
-            if val_rmse < best_val:
-                best_val = val_rmse
-                best_IW, best_bias = IW, bias
-                best_lam, best_delta = lam, delta
-
-    H_full = elm_sigmoid(X @ best_IW.T + best_bias)
-    best_beta, best_delta = huber_solve(H_full, y, best_lam)
-    return best_beta, best_IW, best_bias, best_lam, best_delta, best_val
+    combos = [(lam,) for lam in lams]
+    beta, IW, bias, combo, delta, best_val = select_by_temporal_cv(
+        X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
+    )
+    return beta, IW, bias, combo[0], delta, best_val
 
 
 def train_elm_huber_grid(
@@ -115,7 +102,7 @@ def train_elm_huber_grid(
     n_candidates_list: list[int],
     rng: np.random.Generator,
     lam_grid: list[float] | None = None,
-    val_ratio: float = 0.20,
+    k: int = CV_FOLDS,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float, float]:
     best_val = np.inf
     best_beta = best_IW = best_bias = None
@@ -125,7 +112,7 @@ def train_elm_huber_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, lam_sel, delta_sel, val_rmse = train_elm_huber(
                 X, y, n_hidden, n_candidates, rng,
-                lam_grid=lam_grid, val_ratio=val_ratio,
+                lam_grid=lam_grid, k=k,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "

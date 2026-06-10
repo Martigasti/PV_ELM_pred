@@ -2,3 +2,5 @@ numpy
 pandas
 pvlib
 nixtla
+xarray
+netCDF4

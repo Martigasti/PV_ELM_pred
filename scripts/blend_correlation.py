@@ -1,22 +1,25 @@
 """
 Persistence baselines (P, Pcyclic, BLEND) over the whole dataset.
 
+BLEND (paper eq. 16): x_hat_{t+h} = lambda * x_{t+h-T} + (1 - lambda) * x_t,
+i.e. lambda weights the cyclic-persistence term P°.
+
 BLEND weight estimated via the paper's formula (eq. 17):
     lambda_{phi,h} = 0.5 * (1 + rho_{phi,h})
-where rho is the phase-conditioned empirical correlation between P and the
-target, computed over the calibration period.
+where rho_{phi,h} is the empirical correlation between the current trajectory
+x_t and the same phase of the previous day x_{t+h-T} (the P° term), conditioned
+on the issue-time phase phi(t), computed over the calibration period.
 """
 import os
 import time
 from math import floor
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from dataset_config import CACHE_NPY, CSV_FILE, NDATA_FULL, RESULTS_DIR, day_mask
 from utils import (
     build_metric_row,
-    compute_is_day_mask,
     load_30min,
     predict_blend,
     predict_cyclic_persistence,
@@ -39,48 +42,50 @@ if SMOKE_TEST:
     T_period = 48
 else:
     print("*** FULL MODE ***")
-    Ndata    = round(2 * 365.25 * 48)
+    Ndata    = NDATA_FULL
     LB_list  = [48]
     FH_list  = [1, 2, 6, 12, 20]
     ratio    = 0.50
     T_period = 48
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CSV_FILE = PROJECT_ROOT / "data" / "PV_AC_20200801_20250706_Palaiseau.csv"
-CACHE_NPY = PROJECT_ROOT / "data" / "data_30min.npy"
-RESULTS_DIR = PROJECT_ROOT / "results"
 OUT_FILE_ALL = RESULTS_DIR / "Results_BLEND_correlation_all.csv"
 OUT_FILE_DAY = RESULTS_DIR / "Results_BLEND_correlation_day.csv"
 PRED_FILE = RESULTS_DIR / "Predictions_BLEND_correlation.csv"
 
 
 # ============================================================================
-# BLEND: rho per target phase (Matlab reproduction)
+# BLEND: rho per issue-time phase (paper eq. 17)
 # ============================================================================
 def compute_cyclic_correlation(
     data_train: np.ndarray, FH: int, T_period: int
 ) -> np.ndarray:
-    """rho_phase[phi] = Pearson(P(t), y(t+FH)) over the samples whose target is in phase phi."""
+    """rho_phase[phi] = Pearson(x_t, x_{t+h-T}) over samples whose issue time t is in phase phi.
+
+    Follows the paper (eq. 17): rho is the empirical correlation between the
+    current trajectory x_t and the same phase of the previous day x_{t+h-T}
+    (the cyclic-persistence term P°), conditioned on the issue-time phase phi(t).
+    """
     N = len(data_train)
     rho_phase = np.zeros(T_period)
 
     for phi in range(T_period):
-        # We want (t + FH) mod T == phi  =>  t mod T == (phi - FH) mod T
-        start = (phi - FH) % T_period
-        idx_t = np.arange(start, N - FH, T_period)
+        # Issue-time phase: t mod T == phi
+        idx_t = np.arange(phi, N - FH, T_period)
+        # P° at the forecast time t+h is x_{t+h-T} => need idx_t + FH - T >= 0
+        idx_t = idx_t[idx_t + FH - T_period >= 0]
         if len(idx_t) < 3:
             continue
 
-        P_pred = data_train[idx_t]
-        y_true = data_train[idx_t + FH]
+        x_t = data_train[idx_t]
+        x_cyc = data_train[idx_t + FH - T_period]
 
-        std_P = P_pred.std()
-        std_y = y_true.std()
-        if std_P < 1e-12 or std_y < 1e-12:
+        std_t = x_t.std()
+        std_cyc = x_cyc.std()
+        if std_t < 1e-12 or std_cyc < 1e-12:
             continue
 
-        rho = np.mean((P_pred - P_pred.mean()) * (y_true - y_true.mean())) / (
-            std_P * std_y
+        rho = np.mean((x_t - x_t.mean()) * (x_cyc - x_cyc.mean())) / (
+            std_t * std_cyc
         )
         rho_phase[phi] = rho
 
@@ -151,11 +156,19 @@ def run_one(
     # the last train target stays within the sample
     # => slice [:idx_split + LB + FH].
     data_tr_raw = data[: idx_split + LB + FH]
+    # rho indexed by issue-time phase phi(t) (paper eq. 17)
     rho_phase = compute_cyclic_correlation(data_tr_raw, FH, T_period)
+    # lam (paper eq. 16/17) multiplies the cyclic term P°: y = lam*Pc + (1-lam)*P
     lam_phase = np.clip(0.5 * (1.0 + rho_phase), 0.0, 1.0)
-
+    # Reindex from issue-time phase to target phase (predict_blend indexes by
+    # target phase): phase_target = (phi + FH) mod T.
+    lam_target = np.empty_like(lam_phase)
+    for phi in range(T_period):
+        lam_target[(phi + FH) % T_period] = lam_phase[phi]
+    # predict_blend computes lam*P + (1-lam)*Pc; pass (1 - lam_target) so that
+    # the effective blend is lam_target*Pc + (1-lam_target)*P (eq. 16).
     y_pred_BL = predict_blend(
-        y_pred_P, y_pred_Pc, lam_phase, offset_base, T_period
+        y_pred_P, y_pred_Pc, 1.0 - lam_target, offset_base, T_period
     )
 
     rows.append(
@@ -176,7 +189,7 @@ def main() -> None:
     data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
     print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
 
-    is_day_full = compute_is_day_mask(len(data))
+    is_day_full = day_mask(len(data))
     print(
         f"Day mask : {is_day_full.sum()}/{len(is_day_full)} steps "
         f"({is_day_full.mean()*100:.1f}% day)"

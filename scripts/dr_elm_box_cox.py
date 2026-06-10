@@ -30,10 +30,10 @@ Models reported per (LB, FH):
     - BLEND_opti : convex least-squares combination of the two persistences
     - ELM : ELM Ridge on Box-Cox transformed Y on [LB lags + 4 time features]
 """
-from math import floor, sqrt
+from math import sqrt
 import numpy as np
 
-from elm_common import VAL_RATIO, elm_sigmoid, ridge_solve, run_elm
+from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
 
 LAMBDA_GRID: list[float] = [10.0, 25.0]
@@ -71,48 +71,32 @@ def train_elm_box_cox(
     rng: np.random.Generator,
     lam_grid: list[float] | None = None,
     lam_bc_grid: list[float] | None = None,
-    val_ratio: float = 0.20,
+    k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
-    """Select (IW, bias, lam_r, lam_bc) by validation RMSE (on the original
+    """Select (IW, bias, lam_r, lam_bc) by temporal CV (RMSE on the original
     Y scale, after Box-Cox inversion), then refit beta on the full train set."""
-    in_size = X.shape[1]
-    n_train = X.shape[0]
-    n_fit = max(1, floor((1.0 - val_ratio) * n_train))
-    X_fit, X_val = X[:n_fit], X[n_fit:]
-    y_fit, y_val = y[:n_fit], y[n_fit:]
-
     grid_r = lam_grid if lam_grid else LAMBDA_GRID
     grid_bc = lam_bc_grid if lam_bc_grid else LAMBDA_BC_GRID
 
-    # Shift for positivity — applied to Y, not to X
-    y_fit_pos = y_fit + BC_SHIFT
-    y_val_pos = y_val + BC_SHIFT
+    def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        lam_bc, lam_r = combo
+        y_fit_bc = box_cox(y_fit + BC_SHIFT, lam_bc)
+        beta = ridge_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit_bc, lam_r)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = np.clip(box_cox_inverse(z_val, lam_bc) - BC_SHIFT, a_min=0.0, a_max=None)
+        return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
-    best_val, best_lam_r, best_lam_bc = np.inf, None, None
-    best_IW, best_bias = None, None
+    def refit(X_full, y_full, IW, bias, combo):
+        lam_bc, lam_r = combo
+        y_full_bc = box_cox(y_full + BC_SHIFT, lam_bc)
+        return ridge_solve(elm_sigmoid(X_full @ IW.T + bias), y_full_bc, lam_r), None
 
-    for _ in range(n_candidates):
-        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
-        bias = rng.uniform(0.0, 1.0, size=n_hidden)
-        H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        H_val = elm_sigmoid(X_val @ IW.T + bias)
-
-        for lam_bc in grid_bc:
-            y_fit_bc = box_cox(y_fit_pos, lam_bc)
-            for lam_r in grid_r:
-                beta = ridge_solve(H_fit, y_fit_bc, lam_r)
-                z_val = H_val @ beta
-                y_val_pred = np.clip(box_cox_inverse(z_val, lam_bc) - BC_SHIFT, a_min=0.0, a_max=None)
-                val_rmse = sqrt(np.mean((y_val_pred - y_val) ** 2))
-                if val_rmse < best_val:
-                    best_val = val_rmse
-                    best_lam_r, best_lam_bc = lam_r, lam_bc
-                    best_IW, best_bias = IW, bias
-
-    H_full = elm_sigmoid(X @ best_IW.T + best_bias)
-    y_full_bc = box_cox(y + BC_SHIFT, best_lam_bc)
-    best_beta = ridge_solve(H_full, y_full_bc, best_lam_r)
-    return best_beta, best_IW, best_bias, best_lam_r, best_lam_bc, best_val
+    combos = [(lam_bc, lam_r) for lam_bc in grid_bc for lam_r in grid_r]
+    beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
+        X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
+    )
+    best_lam_bc, best_lam_r = combo
+    return beta, IW, bias, best_lam_r, best_lam_bc, best_val
 
 
 def train_elm_box_cox_grid(
@@ -129,7 +113,7 @@ def train_elm_box_cox_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, lam_r_sel, lam_bc_sel, val_rmse = train_elm_box_cox(
                 X, y, n_hidden, n_candidates, rng,
-                lam_grid=LAMBDA_GRID, lam_bc_grid=LAMBDA_BC_GRID, val_ratio=VAL_RATIO,
+                lam_grid=LAMBDA_GRID, lam_bc_grid=LAMBDA_BC_GRID, k=CV_FOLDS,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "

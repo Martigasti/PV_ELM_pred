@@ -26,7 +26,6 @@ import pandas as pd
 from blend_optimisation import fit_blend_lambda_per_phase
 from utils import (
     build_metric_row,
-    compute_is_day_mask,
     load_30min,
     predict_blend,
     predict_cyclic_persistence,
@@ -41,6 +40,17 @@ from utils import (
 # ============================================================================
 SMOKE_TEST = os.environ.get("SMOKE_TEST", "1") == "1"
 
+# Dataset paths, site coords and full-mode window come from dataset_config
+# (env var DATASET). NDATA_FULL is the full-mode point cap (None = whole series).
+from dataset_config import (
+    CACHE_NPY,
+    CSV_FILE,
+    DATASET,
+    NDATA_FULL,
+    RESULTS_DIR,
+    day_mask,
+)
+
 if SMOKE_TEST:
     print("*** SMOKE TEST MODE ***")
     Ndata                 = 1000
@@ -50,24 +60,19 @@ if SMOKE_TEST:
     N_ELM_hidden_list     = [4, 8]
     ratio                 = 0.50
     T_period              = 48
-    VAL_RATIO             = 0.20
+    CV_FOLDS              = 5
 else:
     print("*** FULL MODE ***")
-    Ndata                 = round(2 * 365.25 * 48)
+    Ndata                 = NDATA_FULL
     LB_list               = [48]
     FH_list               = [1, 2, 6, 12, 20]
     N_ELM_candidates_list = [100]
     N_ELM_hidden_list     = [500]
     ratio                 = 0.50
     T_period              = 48
-    VAL_RATIO             = 0.20
+    CV_FOLDS              = 5
 
 SEED = 42
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CSV_FILE = PROJECT_ROOT / "data" / "PV_AC_20200801_20250706_Palaiseau.csv"
-CACHE_NPY = PROJECT_ROOT / "data" / "data_30min.npy"
-RESULTS_DIR = PROJECT_ROOT / "results"
 
 
 def build_paths(slug: str) -> tuple[Path, Path, Path]:
@@ -91,6 +96,75 @@ def ridge_solve(H: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:
     A = H.T @ H + lam * np.eye(n_hidden)
     b = H.T @ y
     return np.linalg.solve(A, b)
+
+
+# ============================================================================
+# TEMPORAL CROSS-VALIDATION (expanding window) — hyperparameter selection
+# ============================================================================
+def temporal_cv_splits(n: int, k: int = 5) -> list[tuple[slice, slice]]:
+    """Expanding-window CV splits over a chronological train set.
+
+    Returns k-1 (fit, val) slice pairs: fold i has fit=[0:b_i], val=[b_i:b_{i+1}]
+    with b_j = round(n*j/k). The validation block is always *after* the fit block
+    (we never validate on the past) and the fit block stays contiguous (required
+    by Corr-ELM's correlation matrix and by the cyclic time features).
+    """
+    bounds = [round(n * j / k) for j in range(k + 1)]
+    return [
+        (slice(0, bounds[i]), slice(bounds[i], bounds[i + 1]))
+        for i in range(1, k)
+        if bounds[i + 1] > bounds[i] and bounds[i] > 0
+    ]
+
+
+def select_by_temporal_cv(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_hidden: int,
+    n_candidates: int,
+    rng: np.random.Generator,
+    hparam_combos: list[tuple],
+    fit_score_fn,
+    refit_fn,
+    k: int = 5,
+):
+    """Select (IW, bias, hyperparams) by expanding-window temporal CV, then refit.
+
+    For each random hidden layer (IW, bias) and each hyperparameter combo, the
+    mean validation RMSE over the k-1 expanding-window folds is computed; the
+    triple minimizing it is kept, and the final weights are refit on the *whole*
+    train set with that combo.
+
+    Contract of the variant-specific callbacks:
+      fit_score_fn(X_fit, y_fit, X_val, y_val, IW, bias, combo) -> val_rmse
+          trains beta on the fit slice and returns the RMSE on the val slice.
+      refit_fn(X_full, y_full, IW, bias, combo) -> (beta, extra)
+          refits beta on the full train set; `extra` carries any data-derived
+          quantity selected alongside (e.g. Huber delta, GLM mu offset); use
+          None when there is none.
+
+    Returns (beta, IW, bias, combo, extra, best_val_mean).
+    """
+    in_size = X.shape[1]
+    splits = temporal_cv_splits(X.shape[0], k)
+
+    best_val = np.inf
+    best_IW = best_bias = best_combo = None
+
+    for _ in range(n_candidates):
+        IW = rng.uniform(-1.0, 1.0, size=(n_hidden, in_size))
+        bias = rng.uniform(0.0, 1.0, size=n_hidden)
+        for combo in hparam_combos:
+            scores = [
+                fit_score_fn(X[fit], y[fit], X[val], y[val], IW, bias, combo)
+                for fit, val in splits
+            ]
+            val_rmse = float(np.mean(scores))
+            if val_rmse < best_val:
+                best_val, best_IW, best_bias, best_combo = val_rmse, IW, bias, combo
+
+    beta, extra = refit_fn(X, y, best_IW, best_bias, best_combo)
+    return beta, best_IW, best_bias, best_combo, extra, best_val
 
 
 # ============================================================================
@@ -289,7 +363,7 @@ def run_elm(
     if grid_print:
         print(grid_print)
 
-    is_day_full = compute_is_day_mask(len(data))
+    is_day_full = day_mask(len(data))
     print(
         f"Day mask  : {is_day_full.sum()}/{len(is_day_full)} steps "
         f"({is_day_full.mean()*100:.1f}% day)"
