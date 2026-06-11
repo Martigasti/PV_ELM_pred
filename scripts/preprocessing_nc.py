@@ -33,7 +33,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from dataset_config import CACHE_NPY, DATASET, NC_FILE
+from dataset_config import CACHE_NPY, DATASET, NC_FILE, UNIT
 
 
 def main():
@@ -68,7 +68,7 @@ def main():
     arr = pac.resample("30min").mean().to_numpy()
     print(f"30-min rows   : {len(arr):,}  ({len(arr)/48/365.25:.2f} years)")
     print(f"arr[0]={arr[0]} (first slot = 00:00, expected ~0 / NaN)")
-    print(f"Mean={np.nanmean(arr):.1f} W,  max={np.nanmax(arr):.1f} W")
+    print(f"Mean={np.nanmean(arr):.1f} {UNIT},  max={np.nanmax(arr):.1f} {UNIT}")
 
     CACHE_NPY.parent.mkdir(parents=True, exist_ok=True)
     np.save(CACHE_NPY, arr)

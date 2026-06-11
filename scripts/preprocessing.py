@@ -32,7 +32,8 @@ def main():
     # Resample to 30 min (average of the two 15-min measurements)
     arr = df['PAC'].resample('30min').mean().to_numpy()
     print(f'30-min rows   : {len(arr):,}  ({len(arr)/48/365.25:.2f} years)')
-    print(f'Mean={arr.mean():.1f} W,  max={arr.max():.1f} W')
+    UNIT = 'W'  # Palaiseau PAC unit (cosmetic label)
+    print(f'Mean={arr.mean():.1f} {UNIT},  max={arr.max():.1f} {UNIT}')
 
     # Save the cache
     os.makedirs(DATA_DIR, exist_ok=True)

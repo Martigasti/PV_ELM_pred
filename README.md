@@ -36,7 +36,7 @@ python_prediction/
 │   ├── dr_elm_robust_risk.py      # ELM Robust Risk (Ridge with lam = ε², bounded-uncertainty interpretation)
 │   ├── dr_elm_tikhonov.py         # Anisotropic Tikhonov ELM (penalty proportional to per-neuron energy)
 │   ├── dr_elm_box_cox.py          # Ridge ELM on Box-Cox-transformed target (shift c=1 W)
-│   ├── dr_elm_box_cox_rolling.py  # Box-Cox ELM, rolling refit each step over fixed windows {1m,6m,1y} (off run_full)
+│   ├── dr_elm_box_cox_rolling.py  # Box-Cox ELM, rolling refit each step, same-hour samples + last 3h (off run_full)
 │   ├── dr_elm_mae.py              # ELM-MAE (L1 loss, strict 2-pass, smoothing √(r²+δ²))
 │   ├── dr_elm_log_mse.py          # ELM-Log-MSE (log-quadratic loss, 2-pass, shift c grid)
 │   ├── dr_elm_huber.py            # ELM-Huber (Huber loss, 2-pass, adaptive δ via MAD)

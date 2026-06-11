@@ -254,13 +254,17 @@ def split_and_save(
     out_path_day: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split the merged rows into two CSVs with un-suffixed metric columns."""
-    base = ["Method", "LB_days", "FH_hours"]
+    # Lazy import to keep utils import-cycle-free (dataset_config imports utils).
+    from dataset_config import QUANTITY
+
+    base = ["Method", "quantity", "LB_days", "FH_hours"]
     extras = list(extra_cols or [])
 
     def project(rows: list[dict], suffix: str) -> pd.DataFrame:
         out = []
         for r in rows:
-            d = {c: r.get(c) for c in base + extras}
+            d = {c: r.get(c, QUANTITY if c == "quantity" else None)
+                 for c in base + extras}
             for k in _METRIC_KEYS:
                 d[k] = r.get(f"{k}_{suffix}")
             out.append(d)

@@ -67,7 +67,8 @@ def main():
     arr = df['PAC'].resample('30min').mean().to_numpy()
     print(f'30-min rows   : {len(arr):,}  ({len(arr)/48/365.25:.2f} years)')
     print(f'arr[0]={arr[0]} (first slot = 00:00, expected ~0 / NaN)')
-    print(f'Mean={np.nanmean(arr):.1f},  max={np.nanmax(arr):.1f}')
+    UNIT = 'kW'  # Signes production unit (cosmetic label)
+    print(f'Mean={np.nanmean(arr):.1f} {UNIT},  max={np.nanmax(arr):.1f} {UNIT}')
 
     # Save the cache
     os.makedirs(os.path.dirname(CACHE_NPY), exist_ok=True)

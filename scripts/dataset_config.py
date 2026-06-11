@@ -11,8 +11,10 @@ the output directory in one place:
     DATASET=alice                  -> data/Alice/DimRed_PAC_Alice.nc,    results/Alice
 
 Each entry carries the raw source (CSV or NetCDF), the 30-min cache, the
-results dir, the site coordinates, the series start date (00:00 UTC) and a
-distinct day-mask cache so the sites never overwrite each other's mask.
+results dir, the forecast target name + unit (QUANTITY/UNIT, cosmetic: print
+labels and a `quantity` CSV column), the site coordinates, the series start
+date (00:00 UTC) and a distinct day-mask cache so the sites never overwrite
+each other's mask.
 CSV sources (Palaiseau, oxelar) have nc=None; NetCDF sources (solete, alice)
 have csv=None and are built by preprocessing_nc.py.
 
@@ -35,6 +37,8 @@ _DATASETS = {
         "nc": None,
         "cache": PROJECT_ROOT / "data" / "Palaiseau" / "data_30min.npy",
         "results": PROJECT_ROOT / "results" / "Palaiseau",
+        "quantity": "PAC",
+        "unit": "W",
         "lat": 48.7128,
         "lon": 2.2188,
         "start_utc": "2020-08-01 00:00:00",
@@ -47,6 +51,8 @@ _DATASETS = {
         "nc": None,
         "cache": PROJECT_ROOT / "data" / "cs" / "oxelar_30min.npy",
         "results": PROJECT_ROOT / "results" / "oxelar",
+        "quantity": "PAC",
+        "unit": "kW",
         "lat": 50.773375,
         "lon": 2.474552,
         "start_utc": "2023-11-07 00:00:00",
@@ -64,6 +70,8 @@ _DATASETS = {
         "nc": None,
         "cache": PROJECT_ROOT / "data" / "cs" / "signes_30min.npy",
         "results": PROJECT_ROOT / "results" / "signes",
+        "quantity": "PAC",
+        "unit": "kW",
         "lat": 43.25551,
         "lon": 5.8,
         "start_utc": "2023-10-31 00:00:00",  # first 00:00 UTC <= first row (08:00)
@@ -79,6 +87,8 @@ _DATASETS = {
         "nc": PROJECT_ROOT / "data" / "Solete" / "DimRed_PAC_Solete.nc",
         "cache": PROJECT_ROOT / "data" / "Solete" / "solete_30min.npy",
         "results": PROJECT_ROOT / "results" / "Solete",
+        "quantity": "PAC",
+        "unit": "W",
         "lat": 55.6867,
         "lon": 12.0985,
         "start_utc": "2018-06-01 00:00:00",
@@ -94,6 +104,8 @@ _DATASETS = {
         "nc": PROJECT_ROOT / "data" / "Alice" / "DimRed_PAC_Alice.nc",
         "cache": PROJECT_ROOT / "data" / "Alice" / "alice_30min.npy",
         "results": PROJECT_ROOT / "results" / "Alice",
+        "quantity": "PAC",
+        "unit": "W",
         "lat": -23.7603,
         "lon": 133.8784,
         "start_utc": "2013-08-14 00:00:00",
@@ -102,6 +114,7 @@ _DATASETS = {
         "ndata_full": round(2 * 365.25 * 48),
     },
 }
+
 if DATASET not in _DATASETS:
     raise ValueError(f"Unknown DATASET={DATASET!r}; choose from {list(_DATASETS)}")
 _DS = _DATASETS[DATASET]
@@ -114,7 +127,9 @@ LAT = _DS["lat"]
 LON = _DS["lon"]
 START_UTC = _DS["start_utc"]
 MASK_CACHE = _DS["mask_cache"]
-NDATA_FULL = _DS["ndata_full"]  
+NDATA_FULL = _DS["ndata_full"]
+QUANTITY = _DS["quantity"]  # forecast target name (e.g. "PAC", "GHI"), cosmetic
+UNIT = _DS["unit"]          # physical unit of the target (e.g. "W", "kW", "W/m2")
 
 
 def day_mask(n_steps: int) -> np.ndarray:
