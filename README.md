@@ -129,7 +129,20 @@ Add an entry to the `_DATASETS` dict with these keys:
 | `ndata_full` | Full-mode window length in 30-min steps; `round(2 * 365.25 * 48)` for 2 balanced years, or `None` to use the whole series |
 
 **Step 3 — Create/Build the 30-min cache.**
-Create or run the preprocessing that matches the source format, with `DATASET` set (not working 100%):
+The preprocessing turns the raw file into the `.npy` cache that every model
+reads. Whatever the source format, it must:
+
+1. **Read** the raw timestamped power series (CSV parse or NetCDF decode).
+2. **Parse the timestamps as UTC** and sort the series chronologically.
+3. **Align the start to 00:00 UTC** — reindex onto a complete grid starting at
+   the previous midnight so `arr[0]` is the 00:00 slot (see the midnight caveat
+   below); missing leading slots become NaN → 0 downstream.
+4. **Resample to 30-min averages** (mean of the raw 5/15-min measurements in
+   each slot).
+5. **Save** the resulting 1-D array to the dataset's `cache` path via
+   `np.save`.
+
+Run the preprocessing that matches the source format, with `DATASET` set:
 
 ```bash
 # CSV, Palaiseau-style layout (15-min, start-of-interval)
