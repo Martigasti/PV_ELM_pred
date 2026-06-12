@@ -94,6 +94,74 @@ DATASET=alice  python scripts/preprocessing_nc.py       # Alice NetCDF
 NetCDF datasets (Solete, Alice) require `xarray` + `netCDF4` and have no CSV
 fallback, so their cache must be built first.
 
+### How to add another dataset
+
+The pipeline works with any dataset, so you don't need to change the model script at all. Adding a
+new series means (1) dropping the raw file in `data/`, (2) registering an entry
+in `dataset_config.py`, and (3) building its 30-minute cache. The forecasting
+scripts then run unchanged under `DATASET=<name>`.
+
+**Step 1 — Drop the raw file in `data/`.**
+Create a subdirectory and put the raw series there, e.g.
+`data/MySite/production.csv` (or a `.nc` NetCDF file). The expected raw content
+is a timestamped power series in **UTC**:
+
+- **CSV**: two columns — a timestamp column and a production column. The two
+  existing CSV layouts are Palaiseau (`PV_AC_..._Palaiseau.csv`, 15-min,
+  start-of-interval) and Oxelar/Signes (`measure_date` / `prod`, 5-min,
+  end-of-interval). Reuse whichever matches your file.
+- **NetCDF**: a `time` axis + a `PAC` variable in Watts, handled generically by
+  `preprocessing_nc.py` (Solete, Alice). No new preprocessing script needed.
+
+**Step 2 — Register the dataset in `scripts/dataset_config.py`.**
+Add an entry to the `_DATASETS` dict with these keys:
+
+| Key | Meaning |
+|---|---|
+| `csv` | Path to the raw CSV (`None` for NetCDF sources) |
+| `nc` | Path to the raw NetCDF (`None` for CSV sources) |
+| `cache` | Path to the 30-min `.npy` cache the preprocessing will write |
+| `results` | Output directory under `results/` for this site |
+| `quantity` / `unit` | Forecast target name and its physical unit (cosmetic: print labels + a `quantity` CSV column), e.g. `"PAC"` / `"W"` (or `"kW"`) |
+| `lat` / `lon` | Site coordinates (used for the day/night solar-elevation mask) |
+| `start_utc` | First **00:00 UTC** slot of the series (see the midnight caveat below) |
+| `mask_cache` | Path to a **distinct** day-mask cache so sites never overwrite each other's mask |
+| `ndata_full` | Full-mode window length in 30-min steps; `round(2 * 365.25 * 48)` for 2 balanced years, or `None` to use the whole series |
+
+**Step 3 — Build the 30-min cache.**
+Run the preprocessing that matches the source format, with `DATASET` set:
+
+```bash
+# CSV, Palaiseau-style layout (15-min, start-of-interval)
+DATASET=mysite python scripts/preprocessing.py
+
+# CSV, Oxelar/Signes-style layout (measure_date / prod, 5-min, end-of-interval)
+DATASET=mysite python scripts/preprocessing_oxelar.py
+
+# NetCDF (time + PAC)
+DATASET=mysite python scripts/preprocessing_nc.py
+```
+
+If your CSV does not match either existing layout, copy the closest
+preprocessing script (`preprocessing.py` or `preprocessing_oxelar.py`) to
+`preprocessing_mysite.py` and adapt only the column names / raw step. The
+script must produce a 1-D 30-min array whose **`arr[0]` is the 00:00 UTC slot**.
+
+**Step 4 — Run the benchmark.**
+
+```bash
+DATASET=mysite python scripts/run_full.py      # results land in results/MySite/
+```
+
+> **Midnight caveat.** The whole pipeline assumes `arr[0]` is the 00:00 UTC
+> slot (cyclic time features via `idx % 48`, the day/night mask start date, and
+> cyclic persistence P° at 48 steps all depend on it). If your raw series does
+> not start exactly at midnight, the preprocessing must **pad the head up to the
+> previous 00:00 UTC** by reindexing onto a complete grid (as
+> `preprocessing_oxelar.py` and `preprocessing_nc.py` already do). Set
+> `start_utc` to that first midnight, not to the first data row. Skipping this
+> silently de-phases the cyclic features and the day/night mask.
+
 ## Running the models
 
 ### Run all models (full mode)
