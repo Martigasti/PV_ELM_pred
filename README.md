@@ -128,8 +128,8 @@ Add an entry to the `_DATASETS` dict with these keys:
 | `mask_cache` | Path to a **distinct** day-mask cache so sites never overwrite each other's mask |
 | `ndata_full` | Full-mode window length in 30-min steps; `round(2 * 365.25 * 48)` for 2 balanced years, or `None` to use the whole series |
 
-**Step 3 — Build the 30-min cache.**
-Run the preprocessing that matches the source format, with `DATASET` set:
+**Step 3 — Create/Build the 30-min cache.**
+Create or run the preprocessing that matches the source format, with `DATASET` set (not working 100%):
 
 ```bash
 # CSV, Palaiseau-style layout (15-min, start-of-interval)
@@ -153,14 +153,15 @@ script must produce a 1-D 30-min array whose **`arr[0]` is the 00:00 UTC slot**.
 DATASET=mysite python scripts/run_full.py      # results land in results/MySite/
 ```
 
-> **Midnight caveat.** The whole pipeline assumes `arr[0]` is the 00:00 UTC
-> slot (cyclic time features via `idx % 48`, the day/night mask start date, and
-> cyclic persistence P° at 48 steps all depend on it). If your raw series does
-> not start exactly at midnight, the preprocessing must **pad the head up to the
-> previous 00:00 UTC** by reindexing onto a complete grid (as
-> `preprocessing_oxelar.py` and `preprocessing_nc.py` already do). Set
-> `start_utc` to that first midnight, not to the first data row. Skipping this
-> silently de-phases the cyclic features and the day/night mask.
+> **Midnight caveat.** The dataset must start at **00:00 UTC**: the whole
+> pipeline assumes `arr[0]` is the 00:00 UTC slot (cyclic time features via
+> `idx % 48`, the day/night mask start date, and cyclic persistence P° at 48
+> steps all depend on it). If your raw series does not start exactly at
+> midnight, the preprocessing must **pad the head up to the previous 00:00 UTC**
+> by reindexing onto a complete grid (as `preprocessing_oxelar.py` and
+> `preprocessing_nc.py` already do), and `start_utc` must be set to that first
+> midnight, not to the first data row. Skipping this silently de-phases the
+> cyclic features and the day/night mask.
 
 ## Running the models
 
