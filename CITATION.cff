@@ -1,0 +1,49 @@
+cff-version: 1.0.0
+title: "ELM benchmark for PV prediction"
+message: "If you use this software, please cite it as below."
+type: software
+
+authors:
+  - given-names: "Martin"
+    family-names: "Leiva"
+    affiliation: "Université Paris-Saclay, Orsay, France"
+
+  - given-names: "Xavier"
+    family-names: "Silvani"
+    affiliation: "..."
+    orcid: "..."
+
+  - given-names: "Gilles"
+    family-names: "Notton"
+    affiliation: "..."
+    orcid: "..."
+
+  - given-names: "Cyril"
+    family-names: "Voyant"
+    affiliation: "Mines Paris – PSL, O.I.E. Laboratory, France"
+    orcid: "https://orcid.org/0000-0003-0242-7377"
+
+repository-code: "https://github.com/Martigasti/PV_ELM_pred"
+url: ""
+doi: ""
+version: "v1.0.0"
+date-released: "2026-06-12"
+license: "MIT"
+
+abstract: >
+  A benchmark of simple statistical models for photovoltaic power forecasting
+  (AC output, after the inverter) across multiple horizons, from 30 minutes to
+  10 hours ahead. The tool compares persistence baselines, convex BLEND
+  combinations, a linear AR-OLS model, and a family of Extreme Learning Machine
+  (ELM) variants differing in their loss function and regularization (Ridge,
+  Tikhonov, Box-Cox, MAE, Huber, Log-MSE, Elastic Net, Corr-ELM, M-estimator,
+  Lp, GLM, L3), together with foundation-model (TimeGPT) and NeuralProphet
+  references. Models are evaluated with skill scores against persistence (NICE)
+  on several open PV sites. Developed during an M1 research internship at
+  Università di Corsica Pasquale Paoli. Laboratory, France.
+
+keywords:
+  - ELM
+  - benchmark
+  - photovoltaic
+  - predictions

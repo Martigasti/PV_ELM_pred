@@ -16,4 +16,3 @@ scripts/export_data_used.py
 scripts/make_results_tex.py
 scripts/score_neural_prophet.py
 scripts/dr_elm_box_cox_rolling.py
-CITATION.cff

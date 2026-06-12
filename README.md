@@ -311,3 +311,31 @@ the same sub-population (all samples / daytime only).
   - $NICE^k \approx 1$: no better than persistence.
   - $NICE^k > 1$: worse than persistence (to be avoided).
 - **`_all` vs `_day`**: `_all` metrics include nights (where $y = 0$ and persistence is trivial), which artificially inflates scores. `_day` metrics are more representative of the true difficulty of PV forecasting.
+
+## Citation
+
+If you use this software, please cite this project as follows.
+
+### BibTeX
+
+```bibtex
+@software{,
+    author  = {Martin Leiva, Xavier Silvani, Gilles Notton, Cyril Voyant},
+    title   = {ELM benchmark for PV predictions},
+    year    = {2026},
+    version = {1.0.0},
+    license = {MIT},
+    doi     = {},
+    url     = {},
+    note    = {}
+}
+```
+
+### Plain text
+
+A machine-readable `CITATION.cff` file is provided at the repository root and is
+automatically picked up by GitHub, Zenodo and Google Scholar.
+
+## License
+
+MIT.
