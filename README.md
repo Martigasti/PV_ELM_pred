@@ -1,7 +1,10 @@
-# PV Forecasting — Palaiseau
+# PV Forecasting
 
-Benchmark of photovoltaic power forecasting models (AC power output)
-on 30-minute data from Palaiseau (August 2020 -- August 2022).
+Benchmark of photovoltaic power forecasting models (AC power output),
+originally built on 30-minute data from Palaiseau (August 2020 -- August 2022)
+and now supporting multiple datasets/sites (Oxelar, Signes, SOLETE, Alice Springs,
+GHI series, Barani MeteoHelix weather stations, and any new site added via
+`dataset_config.py`) through a common pipeline.
 Persistence baselines, two variants of convex BLEND, a linear AR-OLS model,
 and several ELM variants are compared across multiple forecast horizons.
 
@@ -14,17 +17,20 @@ python_prediction/
 │   │   ├── PV_AC_20200801_20250706_Palaiseau.csv   # Raw data (AC power, 15-min steps)
 │   │   ├── data_30min.npy                          # Cache: series resampled to 30 min
 │   │   └── is_day_mask.npy                         # Cache: day/night mask (solar elevation > 0°)
-│   ├── cs/                                         # Oxelar + Signes datasets (raw CSV + 30-min cache + mask)
+│   ├── cs/                                         # Oxelar + Signes datasets (company data — NOT included in this repo)
 │   ├── Solete/                                     # SOLETE dataset (DimRed_PAC_Solete.nc + 30-min cache + mask)
-│   └── Alice/                                      # Alice Springs dataset (DimRed_PAC_Alice.nc + 30-min cache + mask)
+│   ├── Alice/                                      # Alice Springs dataset (DimRed_PAC_Alice.nc + 30-min cache + mask)
+│   ├── GHI_Pal/                                    # Palaiseau GHI dataset (raw CSV + 30-min cache + mask)
+│   ├── GHI_Alice/                                  # Alice Springs GHI dataset (raw CSV + 30-min cache + mask)
+│   └── Xavier/                                     # Barani MeteoHelix weather data (raw CSV + meteo_* 10-min caches)
 ├── requirements.txt                            # Python dependencies
 ├── scripts/
 │   ├── observations.ipynb         # Exploration notebook / figures
-│   ├── preprocessing.py           # Builds data/Palaiseau/data_30min.npy from the CSV
-│   ├── preprocessing_oxelar.py    # Builds data/cs/oxelar_30min.npy from the Oxelar CSV
-│   ├── preprocessing_signes.py    # Builds data/cs/signes_30min.npy from the Signes CSV (same structure as Oxelar)
+│   ├── preprocessing.py           # Dispatcher: builds the dataset's cache, routes to the CSV/NetCDF/meteo parser by DATASET
+│   ├── preprocessing_csv.py       # Generic CSV parser (Palaiseau/oxelar/signes/GHI), driven by DATASET; resamples at the dataset's step
 │   ├── preprocessing_nc.py        # Builds the 30-min cache for the NetCDF datasets (Solete, Alice), driven by DATASET
-│   ├── dataset_config.py          # Dataset selection via DATASET env var (Palaiseau/oxelar/signes/solete/alice)
+│   ├── preprocessing_meteo.py     # Builds the 10-min cache for the Barani MeteoHelix weather datasets (meteo_{vignola,ajaccio}_{temperature,pressure,humidity}), driven by DATASET
+│   ├── dataset_config.py          # Dataset selection via DATASET env var (Palaiseau/oxelar/signes/solete/alice/ghi_palaiseau/ghi_alice/meteo_*)
 │   ├── run_full.py                # Entry point: runs all scripts in full mode
 │   ├── utils.py                   # Shared helpers: data loading, predictors, NICE metrics, day mask
 │   ├── elm_common.py              # Factored ELM core: config, elm_sigmoid, ridge_solve, generic run_elm runner
@@ -37,6 +43,7 @@ python_prediction/
 │   ├── dr_elm_tikhonov.py         # Anisotropic Tikhonov ELM (penalty proportional to per-neuron energy)
 │   ├── dr_elm_box_cox.py          # Ridge ELM on Box-Cox-transformed target (shift c=1 W)
 │   ├── dr_elm_box_cox_rolling.py  # Box-Cox ELM, rolling refit each step, same-hour samples + last 3h (off run_full)
+│   ├── dr_elm_ridge_rolling.py    # Ridge ELM rolling (neutral control), any step size (48/144), honours CLIP_NONNEG (off run_full)
 │   ├── dr_elm_mae.py              # ELM-MAE (L1 loss, strict 2-pass, smoothing √(r²+δ²))
 │   ├── dr_elm_log_mse.py          # ELM-Log-MSE (log-quadratic loss, 2-pass, shift c grid)
 │   ├── dr_elm_huber.py            # ELM-Huber (Huber loss, 2-pass, adaptive δ via MAD)
@@ -47,7 +54,6 @@ python_prediction/
 │   ├── dr_elm_lp.py               # ELM-Lp (general L^p norm, p in (1,2)), 2-pass, joint grid (λ, p)
 │   ├── dr_elm_glm.py              # ELM-GLM linearised Fisher (Gamma + log link), 2-pass, joint grid (λ, c)
 │   ├── timegpt.py                 # TimeGPT (Nixtla foundation model, zero-shot; needs NIXTLA_API_KEY)
-│   ├── score_neural_prophet.py    # Score external NeuralProphet forecasts with benchmark metrics (NICE)
 │   ├── dr_elm_znocyclic_ols.py    # Ablation: ELM OLS without the 4 cyclic features (FH=1)
 │   ├── dr_elm_znocyclic_ridge.py  # Ablation: ELM Ridge without the 4 cyclic features (FH=1)
 │   └── dr_elm_znocyclic_rr.py     # Ablation: ELM Robust Risk without the 4 cyclic features (FH=1)
@@ -81,100 +87,112 @@ first call to `compute_is_day_mask` and cached to disk.
 ### Other datasets
 
 The `DATASET` env var selects the series (default `Palaiseau`; also `oxelar`,
-`signes`, `solete`, `alice`), via `dataset_config.py`. Build each dataset's cache
-once with its preprocessing, then everything else is driven by `DATASET`:
+`signes`, `solete`, `alice`, `ghi_palaiseau`, `ghi_alice`, and the weather
+sets `meteo_{vignola,ajaccio}_{temperature,pressure,humidity}`), via
+`dataset_config.py`. You don't even need to build the cache by hand: the single
+dispatcher `preprocessing.py` routes to the right parser by `DATASET`, and
+`run_full.py` calls it automatically when the cache is missing. So one command
+runs the whole benchmark for any declared dataset:
 
 ```bash
-DATASET=oxelar python scripts/preprocessing_oxelar.py   # Oxelar CSV
-DATASET=signes python scripts/preprocessing_signes.py   # Signes CSV
-DATASET=solete python scripts/preprocessing_nc.py       # SOLETE NetCDF
-DATASET=alice  python scripts/preprocessing_nc.py       # Alice NetCDF
+DATASET=oxelar python scripts/run_full.py          # builds the cache if needed, then runs
+```
+
+To build a cache explicitly (optional), use the dispatcher:
+
+```bash
+DATASET=oxelar        python scripts/preprocessing.py   # CSV   -> preprocessing_csv
+DATASET=solete        python scripts/preprocessing.py   # NetCDF-> preprocessing_nc
+DATASET=ghi_palaiseau python scripts/preprocessing.py   # GHI CSV
+DATASET=meteo_vignola_temperature python scripts/preprocessing.py  # weather (one per station x target)
 ```
 
 NetCDF datasets (Solete, Alice) require `xarray` + `netCDF4` and have no CSV
-fallback, so their cache must be built first.
+fallback.
+
+**Weather datasets (`meteo_*`)** differ from the solar sets: they forecast
+non-solar variables (temperature, pressure, humidity) and **keep their native
+10-min step** (`STEPS_PER_DAY = 144` instead of 48), so the lookback and horizons
+stay the same physical durations. Targets are not clipped to ≥ 0 (temperature is
+negative), the day/night mask is neutralised (`_day` equals `_all` — read `_all`),
+and one source CSV holds 6 stations: `preprocessing_meteo.py` filters one by
+`serial_number` and writes one `.npy` per station×target. Run the 6 combinations
+(Vignola/Ajaccio × temperature/pressure/humidity) as separate `DATASET` runs.
 
 ### How to add another dataset
 
-The pipeline works with any dataset, so you don't need to change the model script at all. Adding a
-new series means (1) dropping the raw file in `data/`, (2) registering an entry
-in `dataset_config.py`, and (3) building its 30-minute cache. The forecasting
-scripts then run unchanged under `DATASET=<name>`.
+The pipeline works with any dataset, so you don't need to touch the model
+scripts. For a **CSV or NetCDF tabular** series, adding it is just (1) dropping
+the raw file in `data/` and (2) registering an entry in `dataset_config.py` — no
+new preprocessing script, and the cache is built automatically by `run_full.py`:
+
+```bash
+DATASET=mysite python scripts/run_full.py      # builds the cache, then runs; results in results/MySite/
+```
 
 **Step 1 — Drop the raw file in `data/`.**
 Create a subdirectory and put the raw series there, e.g.
 `data/MySite/production.csv` (or a `.nc` NetCDF file). The expected raw content
 is a timestamped power series in **UTC**:
 
-- **CSV**: two columns — a timestamp column and a production column. The two
-  existing CSV layouts are Palaiseau (`PV_AC_..._Palaiseau.csv`, 15-min,
-  start-of-interval) and Oxelar/Signes (`measure_date` / `prod`, 5-min,
-  end-of-interval). Reuse whichever matches your file.
+- **CSV**: a timestamp column and a value column. The generic parser
+  (`preprocessing_csv.py`) handles the separator, column names, date format,
+  decimal comma, native step and a `+HH:MM` tz suffix — all configured by keys in
+  the dataset entry (see Step 2). It covers the existing layouts (Palaiseau
+  15-min, Oxelar/Signes 5-min `measure_date`/`prod`, GHI `;`-separated 30-min).
 - **NetCDF**: a `time` axis + a `PAC` variable in Watts, handled generically by
-  `preprocessing_nc.py` (Solete, Alice). No new preprocessing script needed.
+  `preprocessing_nc.py` (Solete, Alice).
 
 **Step 2 — Register the dataset in `scripts/dataset_config.py`.**
-Add an entry to the `_DATASETS` dict with these keys:
+Add an entry to the `_DATASETS` dict. **Required** keys:
 
 | Key | Meaning |
 |---|---|
 | `csv` | Path to the raw CSV (`None` for NetCDF sources) |
 | `nc` | Path to the raw NetCDF (`None` for CSV sources) |
-| `cache` | Path to the 30-min `.npy` cache the preprocessing will write |
+| `cache` | Path to the `.npy` cache the preprocessing will write |
 | `results` | Output directory under `results/` for this site |
-| `quantity` / `unit` | Forecast target name and its physical unit (cosmetic: print labels + a `quantity` CSV column), e.g. `"PAC"` / `"W"` (or `"kW"`) |
+| `quantity` / `unit` | Forecast target name and its physical unit (cosmetic), e.g. `"PAC"` / `"W"` |
 | `lat` / `lon` | Site coordinates (used for the day/night solar-elevation mask) |
 | `start_utc` | First **00:00 UTC** slot of the series (see the midnight caveat below) |
 | `mask_cache` | Path to a **distinct** day-mask cache so sites never overwrite each other's mask |
-| `ndata_full` | Full-mode window length in 30-min steps; `round(2 * 365.25 * 48)` for 2 balanced years, or `None` to use the whole series |
+| `ndata_full` | Full-mode window length in cache-step slots; `round(2 * 365.25 * 48)` for 2 balanced years at 30-min, or `None` to use the whole series |
 
-**Step 3 — Create/Build the 30-min cache.**
-The preprocessing turns the raw file into the `.npy` cache that every model
-reads. Whatever the source format, it must:
+**Optional CSV-parsing keys** (read with `.get()` defaults, so existing datasets
+are unaffected): `sep` (default `","`), `datetime_col` (`"datetime"`),
+`target_col` (`"PAC"`), `date_format` (`"%Y-%m-%d %H:%M:%S"`), `split_plus`
+(strip a `+HH:MM` suffix, default `True`), `decimal_comma` (default `False`),
+`raw_freq` (native source step, e.g. `"5min"`), and `cache_freq`. By default the
+cache is resampled to **30 min** (`STEPS_PER_DAY = 48`); set `cache_freq` to your
+`raw_freq` to **predict at the dataset's native step** instead. `STEPS_PER_DAY`
+is then derived from it and the lookback / horizons follow automatically. For
+non-solar targets also set `clip_nonneg=False` and `solar=False` (as the weather
+sets do). A `parser` key (`"csv"`/`"nc"`/`"meteo"`) can force the route; it is
+otherwise inferred (NetCDF if `nc` is set, meteo if the name starts with
+`meteo_`, else CSV).
 
-1. **Read** the raw timestamped power series (CSV parse or NetCDF decode).
-2. **Parse the timestamps as UTC** and sort the series chronologically.
-3. **Align the start to 00:00 UTC** — reindex onto a complete grid starting at
-   the previous midnight so `arr[0]` is the 00:00 slot (see the midnight caveat
-   below); missing leading slots become NaN → 0 downstream.
-4. **Resample to 30-min averages** (mean of the raw 5/15-min measurements in
-   each slot).
-5. **Save** the resulting 1-D array to the dataset's `cache` path via
-   `np.save`.
-
-Run the preprocessing that matches the source format, with `DATASET` set:
-
-```bash
-# CSV, Palaiseau-style layout (15-min, start-of-interval)
-DATASET=mysite python scripts/preprocessing.py
-
-# CSV, Oxelar/Signes-style layout (measure_date / prod, 5-min, end-of-interval)
-DATASET=mysite python scripts/preprocessing_oxelar.py
-
-# NetCDF (time + PAC)
-DATASET=mysite python scripts/preprocessing_nc.py
-```
-
-If your CSV does not match either existing layout, copy the closest
-preprocessing script (`preprocessing.py` or `preprocessing_oxelar.py`) to
-`preprocessing_mysite.py` and adapt only the column names / raw step. The
-script must produce a 1-D 30-min array whose **`arr[0]` is the 00:00 UTC slot**.
-
-**Step 4 — Run the benchmark.**
+**Step 3 — Run the benchmark.**
+`run_full.py` builds the cache via the dispatcher `preprocessing.py` if it is
+missing, then runs every model (TimeGPT excluded by default):
 
 ```bash
 DATASET=mysite python scripts/run_full.py      # results land in results/MySite/
 ```
 
+If your source is too exotic for the generic CSV parser (Excel/JSON, epoch
+timestamps, a non-UTC zone to convert, multi-column aggregation, a multi-station
+source like Barani), write a small dedicated parser and route to it (set
+`parser` accordingly, as `preprocessing_meteo.py` does). The script must produce
+a 1-D array whose **`arr[0]` is the 00:00 UTC slot**.
+
 > **Midnight caveat.** The dataset must start at **00:00 UTC**: the whole
 > pipeline assumes `arr[0]` is the 00:00 UTC slot (cyclic time features via
-> `idx % 48`, the day/night mask start date, and cyclic persistence P° at 48
-> steps all depend on it). If your raw series does not start exactly at
-> midnight, the preprocessing must **pad the head up to the previous 00:00 UTC**
-> by reindexing onto a complete grid (as `preprocessing_oxelar.py` and
-> `preprocessing_nc.py` already do), and `start_utc` must be set to that first
-> midnight, not to the first data row. Skipping this silently de-phases the
-> cyclic features and the day/night mask.
+> `idx % STEPS_PER_DAY`, the day/night mask start date, and cyclic persistence P°
+> at one day all depend on it). If your raw series does not start exactly at
+> midnight, the preprocessing pads the head up to the previous 00:00 UTC by
+> reindexing onto a complete grid (the generic CSV/NetCDF parsers already do
+> this), and `start_utc` must be set to that first midnight, not to the first
+> data row. Skipping this silently de-phases the cyclic features and the mask.
 
 ## Running the models
 
@@ -266,8 +284,10 @@ CORR_BANDED=0 python scripts/run_full.py corr   # full mode + dense C
 | ELM (M-Estimator)   | Welsch redescending cost $\rho(r) = \tfrac{c^2}{2}(1 - e^{-(r/c)^2})$, strict 2-pass: Pass 1 Ridge init, Pass 2 a single weighted solve with $W = \mathrm{diag}(e^{-(r^{(0)}/c)^2})$, $c = 2.985 \cdot \mathrm{MAD}(r^{(0)}) / 0.6745$; grid over $\lambda$ |
 | ELM ($L_p$)         | General $L^p$ norm cost $\sum_i \lvert r_i\rvert^p + \lambda\lVert\beta\rVert_2^2$ with $p \in (1,2)$, strict 2-pass: Pass 1 Ridge init, Pass 2 a single weighted solve with $W_p = \mathrm{diag}(\lvert r^{(0)}\rvert^{p-2})$ (floor at $\varepsilon$ to avoid division by zero); joint grid $(\lambda, p)$ |
 | ELM (GLM)           | Linearised GLM (Fisher scoring, one step) with Gamma + log link: $g(\mu) = \log\mu$, $\mathrm{Var}(Y) \propto \mu^2$. Strict 2-pass: Pass 1 Ridge on $y$, Pass 2 a single weighted solve with adjusted variable $z = \log(\hat\mu) + (y + c - \hat\mu)/\hat\mu$ and weights $W_\eta = \mathrm{diag}(\hat\mu^2)$. $\beta$ lives in log-space, $\hat y = \exp(H\beta) - c$. Joint grid $(\lambda, c)$ |
+| ELM (Box-Cox rolling) | Box-Cox ELM retrained on a **sliding window** $[t-W,t]$ (all supervised pairs) at window sizes $W \in \{1\text{m}, 6\text{m}, 1\text{y}\}$, with $\beta$ re-solved every week (hidden layer re-drawn per refit, $\lambda$ chosen per horizon by temporal CV). Evaluated on a later, common test window (needs 1 y of history), so its NICE is not directly comparable to the static models. Off `run_full.py` |
+| ELM (Ridge rolling) | Ridge counterpart of the rolling Box-Cox (**neutral control**: after night-clipping the static costs are tied in NICE$^\Sigma$, so any gain over the static 50/50 split is attributable to the rolling, not the cost). Same machinery, closed-form Ridge on the raw target; generalised to any step size (48/144) and honours `CLIP_NONNEG` (no $\ge 0$ clip for temperature) → runs on the 30-min PV/GHI sets and the 10-min weather sets. Off `run_full.py` |
 | TimeGPT             | Nixtla foundation model, zero-shot inference (no training, no exogenous features). 1 API call per window covering $h_{\max}$, subsampled at `STRIDE` to fit free-tier quotas. Requires `pip install nixtla` and `NIXTLA_API_KEY` |
-| NeuralProphet       | External model (forecasts supplied by a teammate), scored a posteriori with the benchmark metrics (NICE) via `score_neural_prophet.py`. Two variants: with / without daily seasonality |
+| NeuralProphet       | External model (forecasts supplied by a teammate), scored a posteriori with the benchmark metrics (NICE). Two variants: with / without daily seasonality |
 
 All models share the same inputs (lookback window of $LB=48$ lags +
 sin/cos features for the hour of day and day of year) and the same
@@ -278,7 +298,7 @@ forecast horizons: 0.5 h; 1 h; 3 h; 6 h; 10 h.
 Each script writes to `results/`:
 
 - `Results_<name>_all.csv`: metrics over all test steps
-- `Results_<name>_day.csv`: metrics restricted to daytime steps (nights excluded), computed based on when solar elevation exceeds 0° at the Palaiseau site coordinates (using the pvlib library)
+- `Results_<name>_day.csv`: metrics restricted to daytime steps (nights excluded), computed based on when solar elevation exceeds 0° at the dataset's site coordinates (using the pvlib library)
 - `Predictions_<name>.csv`: point-by-point predictions for each method and horizon
 
 ### Reported metrics

@@ -25,6 +25,7 @@ import pandas as pd
 
 from blend_optimisation import fit_blend_lambda_per_phase
 from utils import (
+    apply_night_mask,
     build_metric_row,
     load_30min,
     predict_blend,
@@ -44,32 +45,43 @@ SMOKE_TEST = os.environ.get("SMOKE_TEST", "1") == "1"
 # (env var DATASET). NDATA_FULL is the full-mode point cap (None = whole series).
 from dataset_config import (
     CACHE_NPY,
+    CLIP_NONNEG,
     CSV_FILE,
     DATASET,
     NDATA_FULL,
     RESULTS_DIR,
+    STEPS_PER_DAY,
     day_mask,
 )
 
+# Horizons expressed in hours (same physical horizons across step sizes), turned
+# into step counts via STEPS_PER_DAY: 0.5/1/3/6/10 h -> {1,2,6,12,20} at 48
+# steps/day (30 min), {3,6,18,36,60} at 144 steps/day (10 min).
+def _h_to_steps(hours):
+    return [round(h * STEPS_PER_DAY / 24.0) for h in hours]
+
+
 if SMOKE_TEST:
     print("*** SMOKE TEST MODE ***")
-    Ndata                 = 1000
-    LB_list               = [48]
-    FH_list               = [1, 12]
+    # Smoke window scales with the step size so LB=24h still leaves a usable
+    # train/test split (1000 pts at 48 steps/day -> proportional at 144).
+    Ndata                 = round(1000 * STEPS_PER_DAY / 48)
+    LB_list               = [STEPS_PER_DAY]              # 24 h lookback
+    FH_list               = _h_to_steps([0.5, 6])       # smoke: 2 horizons
     N_ELM_candidates_list = [2, 4]
     N_ELM_hidden_list     = [4, 8]
     ratio                 = 0.50
-    T_period              = 48
+    T_period              = STEPS_PER_DAY
     CV_FOLDS              = 5
 else:
     print("*** FULL MODE ***")
     Ndata                 = NDATA_FULL
-    LB_list               = [48]
-    FH_list               = [1, 2, 6, 12, 20]
+    LB_list               = [STEPS_PER_DAY]             # 24 h lookback
+    FH_list               = _h_to_steps([0.5, 1, 3, 6, 10])
     N_ELM_candidates_list = [100]
     N_ELM_hidden_list     = [500]
     ratio                 = 0.50
-    T_period              = 48
+    T_period              = STEPS_PER_DAY
     CV_FOLDS              = 5
 
 SEED = 42
@@ -177,8 +189,8 @@ def make_log_predictions(LB: int, FH: int, pred_rows: list[pd.DataFrame]):
             pd.DataFrame(
                 {
                     "Method": method,
-                    "LB_days": LB / 48,
-                    "FH_hours": FH * 0.5,
+                    "LB_days": LB / STEPS_PER_DAY,
+                    "FH_hours": FH * 24.0 / STEPS_PER_DAY,
                     "t_index": np.arange(len(y_true)),
                     "y_true": np.asarray(y_true).ravel(),
                     "y_pred": np.asarray(y_pred).ravel(),
@@ -209,7 +221,9 @@ def prepare_split(
 
     in_extra = 0
     if use_time_features:
-        tfeat = time_features_for_targets(PVin_norm.shape[0], LB, FH)
+        tfeat = time_features_for_targets(
+            PVin_norm.shape[0], LB, FH, steps_per_day=T_period
+        )
         PVin_norm = np.concatenate([PVin_norm, tfeat], axis=1)
         in_extra = 4
 
@@ -248,11 +262,11 @@ def baseline_rows(
     rows: list[dict] = []
 
     # ---- Persistence P
-    y_pred_P = Persis_simple_test
+    y_pred_P = apply_night_mask(Persis_simple_test, mask_day_test)
     rows.append(
         build_metric_row(
             "Persistence_P", LB, FH, Persis_simple_test, y_test, y_pred_P,
-            mask_day_test, extra_fields={"N_params": 0},
+            mask_day_test, extra_fields={"N_params": 0}, steps_per_day=T_period,
         )
     )
     log_predictions("Persistence_P", y_test, y_pred_P)
@@ -261,10 +275,11 @@ def baseline_rows(
     y_pred_Pc = predict_cyclic_persistence(
         data, offset_base, n_test, T_period, fallback=y_pred_P
     )
+    y_pred_Pc = apply_night_mask(y_pred_Pc, mask_day_test)
     rows.append(
         build_metric_row(
             "Persistence_Pcyclic", LB, FH, Persis_simple_test, y_test, y_pred_Pc,
-            mask_day_test, extra_fields={"N_params": 0},
+            mask_day_test, extra_fields={"N_params": 0}, steps_per_day=T_period,
         )
     )
     log_predictions("Persistence_Pcyclic", y_test, y_pred_Pc)
@@ -273,6 +288,7 @@ def baseline_rows(
     data_tr_raw = data[: idx_split + LB + FH]
     lam_phase = fit_blend_lambda_per_phase(data_tr_raw, FH, T_period)
     y_pred_BL = predict_blend(y_pred_P, y_pred_Pc, lam_phase, offset_base, T_period)
+    y_pred_BL = apply_night_mask(y_pred_BL, mask_day_test)
     print(
         f"    [BLEND] lam_phase: min={lam_phase.min():.3f} "
         f"max={lam_phase.max():.3f} mean={lam_phase.mean():.3f}"
@@ -280,7 +296,7 @@ def baseline_rows(
     rows.append(
         build_metric_row(
             "BLEND_opti", LB, FH, Persis_simple_test, y_test, y_pred_BL,
-            mask_day_test, extra_fields={"N_params": 0},
+            mask_day_test, extra_fields={"N_params": 0}, steps_per_day=T_period,
         )
     )
     log_predictions("BLEND_opti", y_test, y_pred_BL)
@@ -301,7 +317,11 @@ def _run_one(
     method_name: str,
     with_baselines: bool,
 ) -> tuple[list[dict], list[pd.DataFrame]]:
-    print(f"\n=== LB={LB} ({LB/48:g}d) | FH={FH} ({FH*0.5:.1f}h) ===")
+    hours_per_step = 24.0 / T_period
+    print(
+        f"\n=== LB={LB} ({LB/T_period:g}d) | "
+        f"FH={FH} ({FH*hours_per_step:.1f}h) ==="
+    )
 
     split = prepare_split(data, is_day_full, LB, FH, use_time_features)
     X_train, X_test = split["X_train"], split["X_test"]
@@ -326,11 +346,13 @@ def _run_one(
     sel_h = sel_dict["n_hidden"]
     nParams_full = sel_h * (LB + in_extra) + sel_h + sel_h
     y_pred_f = predict_fn(X_test, beta, IW, bias)
+    y_pred_f = apply_night_mask(y_pred_f, mask_day_test)
     rows.append(
         build_metric_row(
             method_name, LB, FH, Persis_simple_test, y_test, y_pred_f,
             mask_day_test,
             extra_fields={"N_params": nParams_full, **sel_dict},
+            steps_per_day=T_period,
         )
     )
     log_predictions(method_name, y_test, y_pred_f)
@@ -358,8 +380,8 @@ def run_elm(
 
     out_file_all, out_file_day, pred_file = build_paths(slug)
 
-    data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
-    print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
+    data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata, clip_nonneg=CLIP_NONNEG)
+    print(f"Data: {len(data)} points ({len(data)/STEPS_PER_DAY/365.25:.2f} years)")
     if grid_print:
         print(grid_print)
 

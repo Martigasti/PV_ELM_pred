@@ -36,7 +36,7 @@ import numpy as np
 from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
 
-LAMBDA_GRID: list[float] = [10.0, 25.0]
+LAMBDA_GRID: list[float] = [25.0]
 LAMBDA_BC_GRID: list[float] = [0.0, 0.25, 0.5, 0.75, 1.0]
 BC_SHIFT: float = 1.0  # shift c added to Y to guarantee Y + c > 0
 

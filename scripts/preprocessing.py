@@ -1,51 +1,36 @@
 """
-Preprocessing of the PV_AC Palaiseau dataset.
+Preprocessing dispatcher: builds the dataset's 30-min (or native-step) .npy
+cache, routing to the right parser based on the dataset's PARSER (set/inferred
+in dataset_config.py). One entry point for every dataset:
 
-Reads `PV_AC_20200801_20250706_Palaiseau.csv`, resamples the PAC column
-into 30-minute averages, and saves the resulting 1D array to
-`data_30min.npy`. The scripts in scripts/ consume this cache via their
-`load_30min` helper.
+    DATASET=Palaiseau python scripts/preprocessing.py   # CSV  -> preprocessing_csv
+    DATASET=solete    python scripts/preprocessing.py   # NC   -> preprocessing_nc
+    DATASET=meteo_vignola_temperature python scripts/preprocessing.py  # -> preprocessing_meteo
+
+The CSV/NetCDF/meteo parsers stay importable and runnable on their own; this
+dispatcher just calls the matching `main()`, so adding a CSV dataset needs no new
+script (only an entry in dataset_config.py). run_full.py calls this dispatcher
+automatically when the cache is missing.
 """
 
-import os
-import numpy as np
-import pandas as pd
+import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(HERE)
-DATA_DIR = os.path.join(PROJECT_ROOT, 'data', 'Palaiseau')
-CSV_FILE = os.path.join(DATA_DIR, 'PV_AC_20200801_20250706_Palaiseau.csv')
-CACHE_NPY = os.path.join(DATA_DIR, 'data_30min.npy')
+from dataset_config import DATASET, PARSER
 
 
 def main():
-    # Load the raw data (15-min time step)
-    df = pd.read_csv(CSV_FILE)
-    df['datetime'] = pd.to_datetime(
-        df['datetime'].astype(str).str.split('+').str[0],
-        format='%Y-%m-%d %H:%M:%S',
-    )
-    df = df.sort_values('datetime').set_index('datetime')
-    print(f'Raw rows      : {len(df):,}')
-    print(f'Range         : {df.index.min()} -> {df.index.max()}')
-
-    # Resample to 30 min (average of the two 15-min measurements)
-    arr = df['PAC'].resample('30min').mean().to_numpy()
-    print(f'30-min rows   : {len(arr):,}  ({len(arr)/48/365.25:.2f} years)')
-    UNIT = 'W'  # Palaiseau PAC unit (cosmetic label)
-    print(f'Mean={arr.mean():.1f} {UNIT},  max={arr.max():.1f} {UNIT}')
-
-    # Save the cache
-    os.makedirs(DATA_DIR, exist_ok=True)
-    np.save(CACHE_NPY, arr)
-    print(f'Saved {CACHE_NPY}  ({arr.nbytes/1e6:.1f} MB, {len(arr):,} samples)')
-
-    # Check the size is sufficient for full mode (2 years)
-    N_FULL = round(2 * 365.25 * 48)
-    print(f'Required for full run : {N_FULL:,}')
-    print(f'Available : {len(arr):,}')
-    assert len(arr) >= N_FULL, 'Not enough samples for the full-mode run.'
+    if PARSER == "nc":
+        import preprocessing_nc as mod
+    elif PARSER == "meteo":
+        import preprocessing_meteo as mod
+    else:  # "csv"
+        import preprocessing_csv as mod
+    print(f"[dispatcher] DATASET={DATASET} -> preprocessing_{PARSER}")
+    mod.main()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    t0 = time.time()
     main()
+    dt = time.time() - t0
+    print(f"\n[chrono] preprocessing.py ({DATASET}) : {dt:.2f} s  ({dt/60:.2f} min)")

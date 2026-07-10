@@ -10,7 +10,7 @@ Usage:
     DATASET=solete python scripts/preprocessing_nc.py
     DATASET=alice python scripts/preprocessing_nc.py
 
-Same alignment logic as preprocessing_oxelar.py:
+Same alignment logic as the generic CSV preprocessing (preprocessing_csv.py):
 
   * arr[0] must be the 00:00 UTC slot (the whole pipeline assumes it: cyclic
     time features via idx % 48, day mask start date, P° at 48 steps). We

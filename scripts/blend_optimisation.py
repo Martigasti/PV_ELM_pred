@@ -17,8 +17,17 @@ from math import floor
 import numpy as np
 import pandas as pd
 
-from dataset_config import CACHE_NPY, CSV_FILE, NDATA_FULL, RESULTS_DIR, day_mask
+from dataset_config import (
+    CACHE_NPY,
+    CLIP_NONNEG,
+    CSV_FILE,
+    NDATA_FULL,
+    RESULTS_DIR,
+    STEPS_PER_DAY,
+    day_mask,
+)
 from utils import (
+    apply_night_mask,
     build_metric_row,
     load_30min,
     predict_blend,
@@ -33,20 +42,25 @@ from utils import (
 # ============================================================================
 SMOKE_TEST = os.environ.get("SMOKE_TEST", "1") == "1"
 
+
+def _h_to_steps(hours):
+    return [round(h * STEPS_PER_DAY / 24.0) for h in hours]
+
+
 if SMOKE_TEST:
     print("*** SMOKE TEST MODE ***")
-    Ndata    = 1000
-    LB_list  = [48]
-    FH_list  = [1, 12]
+    Ndata    = round(1000 * STEPS_PER_DAY / 48)
+    LB_list  = [STEPS_PER_DAY]
+    FH_list  = _h_to_steps([0.5, 6])
     ratio    = 0.50
-    T_period = 48
+    T_period = STEPS_PER_DAY
 else:
     print("*** FULL MODE ***")
     Ndata    = NDATA_FULL
-    LB_list  = [48]
-    FH_list  = [1, 2, 6, 12, 20]
+    LB_list  = [STEPS_PER_DAY]
+    FH_list  = _h_to_steps([0.5, 1, 3, 6, 10])
     ratio    = 0.50
-    T_period = 48
+    T_period = STEPS_PER_DAY
 
 OUT_FILE_ALL = RESULTS_DIR / "Results_BLEND_optimisation_all.csv"
 OUT_FILE_DAY = RESULTS_DIR / "Results_BLEND_optimisation_day.csv"
@@ -94,7 +108,10 @@ def run_one(
     LB: int,
     FH: int,
 ) -> tuple[list[dict], list[pd.DataFrame]]:
-    print(f"\n=== LB={LB} ({LB/48:g}d) | FH={FH} ({FH*0.5:.1f}h) ===")
+    print(
+        f"\n=== LB={LB} ({LB/STEPS_PER_DAY:g}d) | "
+        f"FH={FH} ({FH*24.0/STEPS_PER_DAY:.1f}h) ==="
+    )
 
     PVin, PVout = sertomat(data, LB, FH)
     idx_split = floor(ratio * PVin.shape[0])
@@ -113,8 +130,8 @@ def run_one(
             pd.DataFrame(
                 {
                     "Method": method,
-                    "LB_days": LB / 48,
-                    "FH_hours": FH * 0.5,
+                    "LB_days": LB / STEPS_PER_DAY,
+                    "FH_hours": FH * 24.0 / STEPS_PER_DAY,
                     "t_index": np.arange(len(y_true)),
                     "y_true": np.asarray(y_true).ravel(),
                     "y_pred": np.asarray(y_pred).ravel(),
@@ -123,11 +140,11 @@ def run_one(
         )
 
     # ---- Persistence P
-    y_pred_P = Persis_simple_test
+    y_pred_P = apply_night_mask(Persis_simple_test, mask_day_test)
     rows.append(
         build_metric_row(
             "Persistence_P", LB, FH, Persis_simple_test, y_test, y_pred_P,
-            mask_day_test, extra_fields={"N_params": 0},
+            mask_day_test, extra_fields={"N_params": 0}, steps_per_day=T_period,
         )
     )
     log_predictions("Persistence_P", y_test, y_pred_P)
@@ -136,10 +153,11 @@ def run_one(
     y_pred_Pc = predict_cyclic_persistence(
         data, offset_base, n_test, T_period, fallback=y_pred_P
     )
+    y_pred_Pc = apply_night_mask(y_pred_Pc, mask_day_test)
     rows.append(
         build_metric_row(
             "Persistence_Pcyclic", LB, FH, Persis_simple_test, y_test, y_pred_Pc,
-            mask_day_test, extra_fields={"N_params": 0},
+            mask_day_test, extra_fields={"N_params": 0}, steps_per_day=T_period,
         )
     )
     log_predictions("Persistence_Pcyclic", y_test, y_pred_Pc)
@@ -154,6 +172,7 @@ def run_one(
     y_pred_BL = predict_blend(
         y_pred_P, y_pred_Pc, lam_phase, offset_base, T_period
     )
+    y_pred_BL = apply_night_mask(y_pred_BL, mask_day_test)
     print(
         f"[BLEND] lam_phase: min={lam_phase.min():.3f} "
         f"max={lam_phase.max():.3f} mean={lam_phase.mean():.3f}"
@@ -161,7 +180,7 @@ def run_one(
     rows.append(
         build_metric_row(
             "BLEND_opti", LB, FH, Persis_simple_test, y_test, y_pred_BL,
-            mask_day_test, extra_fields={"N_params": 0},
+            mask_day_test, extra_fields={"N_params": 0}, steps_per_day=T_period,
         )
     )
     log_predictions("BLEND_opti", y_test, y_pred_BL)
@@ -173,8 +192,8 @@ def run_one(
 # MAIN
 # ============================================================================
 def main() -> None:
-    data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
-    print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
+    data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata, clip_nonneg=CLIP_NONNEG)
+    print(f"Data: {len(data)} points ({len(data)/STEPS_PER_DAY/365.25:.2f} years)")
 
     is_day_full = day_mask(len(data))
     print(

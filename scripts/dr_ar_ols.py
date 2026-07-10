@@ -20,18 +20,20 @@ import pandas as pd
 
 from elm_common import (
     CACHE_NPY,
+    CLIP_NONNEG,
     CSV_FILE,
     FH_list,
     LB_list,
     Ndata,
     RESULTS_DIR,
+    STEPS_PER_DAY,
     baseline_rows,
     day_mask,
     load_30min,
     make_log_predictions,
     prepare_split,
 )
-from utils import build_metric_row, split_and_save
+from utils import apply_night_mask, build_metric_row, split_and_save
 
 
 OUT_FILE_ALL = RESULTS_DIR / "Results_AR_OLS_all.csv"
@@ -50,8 +52,12 @@ def train_ar_ols(X: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 def ar_predict(X: np.ndarray, beta: np.ndarray) -> np.ndarray:
     X_aug = np.column_stack([np.ones(X.shape[0]), X])
-    # Clip negative values to 0 because PAC is a physical power
-    return np.clip(X_aug @ beta, a_min=0.0, a_max=None)
+    pred = X_aug @ beta
+    # Clip negative values to 0 because PAC is a physical power (skipped for
+    # non-solar meteo targets, e.g. temperature, which can be negative).
+    if CLIP_NONNEG:
+        pred = np.clip(pred, a_min=0.0, a_max=None)
+    return pred
 
 
 # ============================================================================
@@ -63,7 +69,10 @@ def run_one(
     LB: int,
     FH: int,
 ) -> tuple[list[dict], list[pd.DataFrame]]:
-    print(f"\n=== LB={LB} ({LB/48:g}d) | FH={FH} ({FH*0.5:.1f}h) ===")
+    print(
+        f"\n=== LB={LB} ({LB/STEPS_PER_DAY:g}d) | "
+        f"FH={FH} ({FH*24.0/STEPS_PER_DAY:.1f}h) ==="
+    )
 
     split = prepare_split(data, is_day_full, LB, FH, use_time_features=True)
     pred_rows: list[pd.DataFrame] = []
@@ -76,10 +85,12 @@ def run_one(
     print("  [AR_OLS]")
     beta = train_ar_ols(split["X_train"], split["y_train"])
     y_pred_ar = ar_predict(split["X_test"], beta)
+    y_pred_ar = apply_night_mask(y_pred_ar, split["mask_day_test"])
     rows.append(
         build_metric_row(
             "AR_OLS", LB, FH, split["Persis_simple_test"], split["y_test"], y_pred_ar,
             split["mask_day_test"], extra_fields={"N_params": beta.size},
+            steps_per_day=STEPS_PER_DAY,
         )
     )
     log_predictions("AR_OLS", split["y_test"], y_pred_ar)
@@ -91,8 +102,8 @@ def run_one(
 # MAIN
 # ============================================================================
 def main() -> None:
-    data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata)
-    print(f"Data: {len(data)} points ({len(data)/48/365.25:.2f} years)")
+    data = load_30min(CSV_FILE, CACHE_NPY, n_rows=Ndata, clip_nonneg=CLIP_NONNEG)
+    print(f"Data: {len(data)} points ({len(data)/STEPS_PER_DAY/365.25:.2f} years)")
 
     is_day_full = day_mask(len(data))
     print(

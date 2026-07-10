@@ -24,7 +24,12 @@ import pvlib  # For day/night detection (sun angle)
 # ============================================================================
 # DATA LOADING
 # ============================================================================
-def load_30min(csv_path: Path, cache_path: Path, n_rows: int | None = None) -> np.ndarray:
+def load_30min(
+    csv_path: Path,
+    cache_path: Path,
+    n_rows: int | None = None,
+    clip_nonneg: bool = True,
+) -> np.ndarray:
     if cache_path.exists():
         arr = np.load(cache_path)
     else:
@@ -36,7 +41,10 @@ def load_30min(csv_path: Path, cache_path: Path, n_rows: int | None = None) -> n
         df = df.sort_values("datetime").set_index("datetime")
         arr = df["PAC"].resample("30min").mean().to_numpy()
     arr = np.where(np.isnan(arr), 0.0, arr)
-    arr = np.clip(arr, a_min=0.0, a_max=None)
+    # PV/GHI production/irradiance is >= 0; meteo targets (temperature) are not,
+    # so clipping is skipped for them (clip_nonneg=False).
+    if clip_nonneg:
+        arr = np.clip(arr, a_min=0.0, a_max=None)
     if n_rows is not None:
         arr = arr[:n_rows]
     return arr
@@ -122,6 +130,17 @@ def predict_blend(
         lam = lam_phase[phase_k]
         y_pred_BL[k - 1] = lam * y_pred_P[k - 1] + (1.0 - lam) * y_pred_Pc[k - 1]
     return y_pred_BL
+
+
+def apply_night_mask(y_pred: np.ndarray, mask_day: np.ndarray) -> np.ndarray:
+    """Force predictions to 0 where it is night (mask_day False).
+
+    PV production is physically 0 at night; the day mask is astronomical
+    (known in advance), so this is a deterministic post-processing valid in
+    online learning too. For non-solar datasets day_mask is all-True, so this
+    is a no-op automatically -- no SOLAR guard needed.
+    """
+    return np.where(mask_day, np.asarray(y_pred).ravel(), 0.0)
 
 
 # ============================================================================
@@ -233,11 +252,16 @@ def build_metric_row(
     y_pred: np.ndarray,
     mask_day: np.ndarray,
     extra_fields: dict | None = None,
+    steps_per_day: int = 48,
 ) -> dict:
     """Result row with both metric blocks `_all` and `_day`."""
     m_all = metrics_on_subset(y_test, y_pred, persis_ref, mask=None)
     m_day = metrics_on_subset(y_test, y_pred, persis_ref, mask=mask_day)
-    row: dict = dict(Method=method, LB_days=LB / 48, FH_hours=FH * 0.5)
+    row: dict = dict(
+        Method=method,
+        LB_days=LB / steps_per_day,
+        FH_hours=FH * 24.0 / steps_per_day,
+    )
     if extra_fields:
         row.update(extra_fields)
     for k, v in zip(_METRIC_KEYS, m_all):

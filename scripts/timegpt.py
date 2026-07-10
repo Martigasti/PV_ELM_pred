@@ -29,6 +29,7 @@ import pandas as pd
 from blend_optimisation import fit_blend_lambda_per_phase
 from dataset_config import CACHE_NPY, CSV_FILE, NDATA_FULL, RESULTS_DIR, day_mask
 from utils import (
+    apply_night_mask,
     build_metric_row,
     load_30min,
     predict_blend,
@@ -227,19 +228,22 @@ def run_one(
     persis_simple_sub = Persis_simple_test[local_idx]
     mask_day_sub      = mask_day_test[local_idx]
 
+    # Post-processing: force predictions to 0 at night (no-op for non-solar sets).
+    y_pred_tg = apply_night_mask(y_pred_tg, mask_day_sub)
+
     # ---- Persistences and BLEND: computed on the whole test set then subsampled.
-    y_pred_P  = Persis_simple_test[local_idx]
+    y_pred_P  = apply_night_mask(Persis_simple_test[local_idx], mask_day_sub)
     y_pred_Pc_full = predict_cyclic_persistence(
         data, offset_base, n_test, T_period, fallback=Persis_simple_test
     )
-    y_pred_Pc = y_pred_Pc_full[local_idx]
+    y_pred_Pc = apply_night_mask(y_pred_Pc_full[local_idx], mask_day_sub)
 
     data_tr_raw = data[: idx_split + LB + FH]
     lam_phase = fit_blend_lambda_per_phase(data_tr_raw, FH, T_period)
     y_pred_BL_full = predict_blend(
         Persis_simple_test, y_pred_Pc_full, lam_phase, offset_base, T_period
     )
-    y_pred_BL = y_pred_BL_full[local_idx]
+    y_pred_BL = apply_night_mask(y_pred_BL_full[local_idx], mask_day_sub)
 
     rows: list[dict] = []
     pred_rows: list[pd.DataFrame] = []

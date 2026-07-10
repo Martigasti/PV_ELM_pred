@@ -25,10 +25,15 @@ Usage:
     python run_full.py ridge_nocyclic    # ablation: ELM Ridge without the 4 cyclic features, FH=1
     python run_full.py rr_nocyclic     # ablation: ELM Robust Risk without the 4 cyclic features, FH=1
 
-Prerequisites:
-    Run `python scripts/preprocessing.py` once. This writes
-    `data/Palaiseau/data_30min.npy`, which all the scripts pick up via their
-    `load_30min(...)`.
+TimeGPT is an external/API model: it is NOT run by default (the no-argument run
+skips it), but stays launchable explicitly with `run_full.py timegpt`.
+NeuralProphet is scored separately and is not part of this runner.
+
+Preprocessing is automatic: if the dataset's cache (.npy) is missing, this runner
+builds it first by calling the dispatcher `preprocessing.py` (which routes to the
+CSV/NetCDF/meteo parser based on the dataset). So a single command does
+everything for any declared dataset:
+    DATASET=<x> python scripts/run_full.py
 """
 
 import os
@@ -68,6 +73,10 @@ SCRIPTS = {
     'rr_nocyclic'   : 'dr_elm_znocyclic_rr.py',
 }
 
+# Targets run by the no-argument default: everything except the external/API
+# model TimeGPT (still launchable explicitly via `run_full.py timegpt`).
+DEFAULT_TARGETS = [k for k in SCRIPTS if k != 'timegpt']
+
 
 def run_one(name: str) -> None:
     script = SCRIPTS[name]
@@ -83,15 +92,17 @@ def run_one(name: str) -> None:
 
 def main() -> None:
     if not os.path.exists(CACHE_NPY):
-        from dataset_config import DATASET, NC_FILE
-        print(f'WARNING: {CACHE_NPY} not found (DATASET={DATASET}).')
-        if NC_FILE is not None:
-            print('            Run `python scripts/preprocessing_nc.py` first '
-                  '(NetCDF dataset, no CSV fallback).')
-        else:
-            print('            Run the dataset preprocessing first to build the cache.')
+        from dataset_config import DATASET
+        print(f'{CACHE_NPY} not found (DATASET={DATASET}); building it via '
+              'the preprocessing dispatcher...')
+        env = {**os.environ, 'SMOKE_TEST': '0'}
+        proc = subprocess.run([sys.executable, 'preprocessing.py'], cwd=HERE, env=env)
+        if proc.returncode != 0:
+            sys.exit(f'preprocessing failed (code {proc.returncode}) for {DATASET}')
+        if not os.path.exists(CACHE_NPY):
+            sys.exit(f'preprocessing ran but {CACHE_NPY} is still missing.')
 
-    targets = sys.argv[1:] or list(SCRIPTS.keys())
+    targets = sys.argv[1:] or DEFAULT_TARGETS
     bad = [t for t in targets if t not in SCRIPTS]
     if bad:
         sys.exit(f'Unknown target(s): {bad}. Choose from {list(SCRIPTS)}.')
