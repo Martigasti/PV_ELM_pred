@@ -12,11 +12,8 @@ results_code/
 cluster/
 conference.md
 Sujet_ELM_OPTI-6.pdf
-# Datasets and caches (raw CSV / .nc + regenerable .npy) — never in git
 data/
-# Heavy per-step prediction dumps (keep the small Results_* summaries)
 results/**/Predictions_*.csv
-# Prediction figure dumps (keep the summary PNGs)
 figures/**/predictions/
 figures/**/predictions.zip
 scripts/retrain_elm.py
@@ -26,3 +23,4 @@ scripts/score_neural_prophet.py
 scripts/fig_box_cox_days.py
 scripts/make_prediction_figures.py
 scripts/make_presentation_figures.py
+online_plan.md
