@@ -74,6 +74,8 @@ elevation and generate the day/night mask).
 
 ## Data preparation
 
+The data is committed as `data.zip` at the repository root, unzip it (`unzip data.zip`) before running anything so the `data/` folder is available.
+
 First, run **`preprocessing.py`** once. It reads the raw CSV, resamples to
 30-minute steps, and writes `data/Palaiseau/data_30min.npy`. All scripts use this cache.
 
