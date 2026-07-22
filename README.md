@@ -347,7 +347,7 @@ If you use this software, please cite this project as follows.
     year    = {2026},
     version = {1.0.0},
     license = {MIT},
-    doi     = {},
+    doi     = {https://doi.org/10.5281/zenodo.21487267},
     url     = {},
     note    = {}
 }
