@@ -342,7 +342,7 @@ If you use this software, please cite this project as follows.
 
 ```bibtex
 @software{,
-    author  = {Martin Leiva, Xavier Silvani, Gilles Notton, Cyril Voyant},
+    author  = {Martin Leiva, Xavier Silvani, Gilles Notton, Cyril Voyant, Alan Julien},
     title   = {ELM benchmark for PV predictions},
     year    = {2026},
     version = {1.0.0},
