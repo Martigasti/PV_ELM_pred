@@ -8,6 +8,13 @@ least squares) rather than with the Moore-Penrose pseudo-inverse:
     OLS  :  beta = pinv(H) @ y                minimizes ||H beta - y||^2
     Ridge:  beta = (H^T H + lam I)^-1 H^T y   minimizes ||H beta - y||^2 + lam * ||beta||^2
 
+The target is center-scaled on the train (z = (y - mu_y) / sd_y) before the
+solve, and the prediction is mapped back (y_pred = z_pred * sd_y + mu_y). Since
+the inputs are already standardized, this keeps the L2 penalty from shrinking
+the beta that carry a nonzero target mean -- otherwise ridge biases the ELM on
+targets far from zero (meteo variables). mu_y/sd_y are frozen on the train (the
+fit fold in CV, to avoid leaking the future). No learned parameter is added.
+
 Lambda is selected per candidate by minimal validation RMSE over LAMBDA_GRID.
 
 Models reported per (LB, FH):
@@ -20,6 +27,7 @@ from math import sqrt
 import numpy as np
 
 from elm_common import (
+    CLIP_NONNEG,
     CV_FOLDS,
     elm_sigmoid,
     ridge_solve,
@@ -29,6 +37,10 @@ from elm_common import (
 
 
 LAMBDA_GRID: list[float] = [1.0, 10.0, 25.0]
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge_rolling.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
 
 
 # ============================================================================
@@ -46,15 +58,20 @@ def train_elm_ridge(
     """Select (IW, bias, lambda) by temporal CV, then refit beta on the full train set."""
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         (lam,) = combo
+        mu, sd = y_fit.mean(), y_fit.std(ddof=1)  # on the fit fold only (no CV leak)
+        sd = sd if sd > 0 else 1.0
         H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        beta = ridge_solve(H_fit, y_fit, lam)
-        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        beta = ridge_solve(H_fit, (y_fit - mu) / sd, lam)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = _clip(z_val * sd + mu)  # de-standardize THEN clip
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         (lam,) = combo
+        mu, sd = y_full.mean(), y_full.std(ddof=1)
+        sd = sd if sd > 0 else 1.0
         H_full = elm_sigmoid(X_full @ IW.T + bias)
-        return ridge_solve(H_full, y_full, lam), None
+        return ridge_solve(H_full, (y_full - mu) / sd, lam), None
 
     combos = [(lam,) for lam in lam_grid]
     beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
@@ -91,14 +108,25 @@ def train_elm_ridge_grid(
         f"val_RMSE={best_val:.4g}"
     )
     sel_dict = {"n_hidden": best_h, "n_candidates": best_c, "lambda_ridge": best_lam}
-    return best_beta, best_IW, best_bias, sel_dict, elm_predict
+    # The prediction de-standardizes with mu_y/sd_y frozen on the full train:
+    # specialized closure (same pattern as box_cox's lam_bc).
+    mu_y, sd_y = y.mean(), y.std(ddof=1)
+    sd_y = sd_y if sd_y > 0 else 1.0
+
+    def predict_fn(Xte, beta, IW, bias):
+        return elm_predict(Xte, beta, IW, bias, mu_y, sd_y)
+
+    return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    mu: float, sd: float,
 ) -> np.ndarray:
-    # PAC is a physical power: clip negative values to 0.
-    return np.clip(elm_sigmoid(X @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+    # beta lives in center-scaled target space: de-standardize, then _clip
+    # (no-op for non-solar targets, else clips the physical-power output to >=0).
+    z = elm_sigmoid(X @ IW.T + bias) @ beta
+    return _clip(z * sd + mu)
 
 
 # ============================================================================

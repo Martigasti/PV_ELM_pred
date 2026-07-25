@@ -58,7 +58,40 @@ from dataset_config import (
 # into step counts via STEPS_PER_DAY: 0.5/1/3/6/10 h -> {1,2,6,12,20} at 48
 # steps/day (30 min), {3,6,18,36,60} at 144 steps/day (10 min).
 def _h_to_steps(hours):
-    return [round(h * STEPS_PER_DAY / 24.0) for h in hours]
+    steps = [round(h * STEPS_PER_DAY / 24.0) for h in hours]
+    # A horizon shorter than half a step rounds to 0 (e.g. +10 min at 48
+    # steps/day), which would make sertomat target the last input value.
+    for h, s in zip(hours, steps):
+        if s < 1:
+            raise ValueError(
+                f"Horizon {h} h rounds to FH={s} steps at STEPS_PER_DAY="
+                f"{STEPS_PER_DAY} (step = {24*60//STEPS_PER_DAY} min). "
+                f"The shortest horizon this dataset supports is "
+                f"{24/STEPS_PER_DAY:g} h."
+            )
+    return steps
+
+
+def _fh_hours_from_env(default):
+    """Horizons in hours, overridable via FH_HOURS (e.g. '1/6,0.5,1,3').
+
+    Lets a run target other horizons (the paper's +10 min nowcast) without
+    editing this shared list, which every model and dataset reads.
+    """
+    raw = os.environ.get("FH_HOURS")
+    if not raw:
+        return default
+    hours = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        num, _, den = tok.partition("/")
+        hours.append(float(num) / float(den) if den else float(num))
+    if not hours:
+        raise ValueError(f"FH_HOURS={raw!r} parsed to an empty horizon list")
+    print(f"    FH_HOURS override: {hours} h")
+    return hours
 
 
 if SMOKE_TEST:
@@ -67,7 +100,7 @@ if SMOKE_TEST:
     # train/test split (1000 pts at 48 steps/day -> proportional at 144).
     Ndata                 = round(1000 * STEPS_PER_DAY / 48)
     LB_list               = [STEPS_PER_DAY]              # 24 h lookback
-    FH_list               = _h_to_steps([0.5, 6])       # smoke: 2 horizons
+    FH_list               = _h_to_steps(_fh_hours_from_env([0.5, 6]))  # smoke: 2 horizons
     N_ELM_candidates_list = [2, 4]
     N_ELM_hidden_list     = [4, 8]
     ratio                 = 0.50
@@ -77,7 +110,7 @@ else:
     print("*** FULL MODE ***")
     Ndata                 = NDATA_FULL
     LB_list               = [STEPS_PER_DAY]             # 24 h lookback
-    FH_list               = _h_to_steps([0.5, 1, 3, 6, 10])
+    FH_list               = _h_to_steps(_fh_hours_from_env([0.5, 1, 3, 6, 10]))
     N_ELM_candidates_list = [100]
     N_ELM_hidden_list     = [500]
     ratio                 = 0.50

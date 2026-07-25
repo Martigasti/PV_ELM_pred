@@ -18,6 +18,13 @@ IRLS weights w = psi(r)/r (psi = rho'):
 
 Grid-searched hyperparameter: lam. c is derived from the initial Ridge residual.
 
+The target is center-scaled on the train (z = (y - mu_y) / sd_y) before both
+passes, prediction mapped back (y_pred = z_pred * sd_y + mu_y); keeps the ridge
+penalty of Pass 1 from shrinking a nonzero target mean (meteo). Because c =
+2.985 * MAD(residual) is MAD-derived, it scales automatically with z; the
+reported c_welsch is re-multiplied by sd_y (physical units). mu_y/sd_y frozen on
+the train (fit fold in CV).
+
 Models reported per (LB, FH):
     - Persistence_P : y_pred = PAC(t)
     - Persistence_Pcyclic : y_pred = PAC(t + FH - 24h)
@@ -27,8 +34,12 @@ Models reported per (LB, FH):
 from math import sqrt
 import numpy as np
 
-from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
+from elm_common import CLIP_NONNEG, CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
 
 K_WELSCH: float = 2.985
 LAMBDA_GRID: list[float] = [10.0, 25.0]
@@ -81,13 +92,16 @@ def train_elm_m_estimator(
 
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         (lam,) = combo
-        beta, _ = m_estimator_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, lam)
-        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        mu, sd = y_fit.mean(), y_fit.std(ddof=1); sd = sd if sd > 0 else 1.0
+        beta, _ = m_estimator_solve(elm_sigmoid(X_fit @ IW.T + bias), (y_fit - mu) / sd, lam)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = _clip(z_val * sd + mu)
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         (lam,) = combo
-        return m_estimator_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, lam)  # (beta, c)
+        mu, sd = y_full.mean(), y_full.std(ddof=1); sd = sd if sd > 0 else 1.0
+        return m_estimator_solve(elm_sigmoid(X_full @ IW.T + bias), (y_full - mu) / sd, lam)  # (beta, c_z)
 
     combos = [(lam,) for lam in lams]
     beta, IW, bias, combo, c_sel, best_val = select_by_temporal_cv(
@@ -125,17 +139,26 @@ def train_elm_m_estimator_grid(
         f"    -> selected: n_hidden={best_h}  n_cand={best_cand}  "
         f"lam={best_lam:g}  c={best_c:.4g}  val_RMSE={best_val:.4g}"
     )
+    # c selected in z-space; report it in physical units (x sd_y).
+    mu_y, sd_y = y.mean(), y.std(ddof=1); sd_y = sd_y if sd_y > 0 else 1.0
     sel_dict = {
         "n_hidden": best_h, "n_candidates": best_cand,
-        "lambda_m_est": best_lam, "c_welsch": best_c,
+        "lambda_m_est": best_lam, "c_welsch": best_c * sd_y,
     }
-    return best_beta, best_IW, best_bias, sel_dict, elm_predict
+
+    def predict_fn(Xte, beta, IW, bias):
+        return elm_predict(Xte, beta, IW, bias, mu_y, sd_y)
+
+    return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    mu: float, sd: float,
 ) -> np.ndarray:
-    return np.clip(elm_sigmoid(X @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+    # beta lives in center-scaled target space: de-standardize, then _clip.
+    z = elm_sigmoid(X @ IW.T + bias) @ beta
+    return _clip(z * sd + mu)
 
 
 # ============================================================================

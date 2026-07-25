@@ -56,7 +56,9 @@ python_prediction/
 │   ├── timegpt.py                 # TimeGPT (Nixtla foundation model, zero-shot; needs NIXTLA_API_KEY)
 │   ├── dr_elm_znocyclic_ols.py    # Ablation: ELM OLS without the 4 cyclic features (FH=1)
 │   ├── dr_elm_znocyclic_ridge.py  # Ablation: ELM Ridge without the 4 cyclic features (FH=1)
-│   └── dr_elm_znocyclic_rr.py     # Ablation: ELM Robust Risk without the 4 cyclic features (FH=1)
+│   ├── dr_elm_znocyclic_rr.py     # Ablation: ELM Robust Risk without the 4 cyclic features (FH=1)
+│   ├── capacity_curve.py          # Capacity curve: sweeps n_hidden for the 11 raw-target ELM variants, NICE^Σ vs log10(N_θ) (off run_full)
+│   └── capacity_figure.py         # Plots the capacity curve (one curve per variant, mean±σ over seeds; AR-OLS/persistence refs) (off run_full)
 ├── results/                       # Result and prediction CSV files
 └── figures/                       # Plots (predictions vs ground truth, slides, etc.)
 ```

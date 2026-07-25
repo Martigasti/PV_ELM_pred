@@ -5,6 +5,12 @@ Output weights obtained with the Moore-Penrose pseudo-inverse:
 
     beta = pinv(H) @ y minimizes ||H beta - y||^2
 
+The target is center-scaled on the train (z = (y - mu_y) / sd_y) before the
+solve, and the prediction is mapped back (y_pred = z_pred * sd_y + mu_y). Since
+the inputs are already standardized, this keeps the solve from being dominated
+by a nonzero target mean (meteo variables). mu_y/sd_y are frozen on the train
+(the fit fold in CV, to avoid leaking the future).
+
 Models reported per (LB, FH):
     - Persistence_P : y_pred = PAC(t)
     - Persistence_Pcyclic : y_pred = PAC(t + FH - 24h)
@@ -14,7 +20,12 @@ Models reported per (LB, FH):
 from math import sqrt
 import numpy as np
 
-from elm_common import CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
+from elm_common import CLIP_NONNEG, CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
+
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
 
 
 # ============================================================================
@@ -32,14 +43,17 @@ def train_elm(
     # being rewarded merely by a larger n_hidden (which mechanically reduces
     # the training RMSE), while averaging over several seasons.
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
+        mu, sd = y_fit.mean(), y_fit.std(ddof=1); sd = sd if sd > 0 else 1.0
         H_fit = elm_sigmoid(X_fit @ IW.T + bias)
-        beta, *_ = np.linalg.lstsq(H_fit, y_fit, rcond=None)
-        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        beta, *_ = np.linalg.lstsq(H_fit, (y_fit - mu) / sd, rcond=None)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = _clip(z_val * sd + mu)
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
+        mu, sd = y_full.mean(), y_full.std(ddof=1); sd = sd if sd > 0 else 1.0
         H_full = elm_sigmoid(X_full @ IW.T + bias)
-        beta, *_ = np.linalg.lstsq(H_full, y_full, rcond=None)
+        beta, *_ = np.linalg.lstsq(H_full, (y_full - mu) / sd, rcond=None)
         return beta, None
 
     beta, IW, bias, _, _, best_val = select_by_temporal_cv(
@@ -74,14 +88,22 @@ def train_elm_grid(
         f"    -> selected: n_hidden={best_h}  n_cand={best_c}  val_RMSE={best_val:.4g}"
     )
     sel_dict = {"n_hidden": best_h, "n_candidates": best_c}
-    return best_beta, best_IW, best_bias, sel_dict, elm_predict
+    mu_y, sd_y = y.mean(), y.std(ddof=1); sd_y = sd_y if sd_y > 0 else 1.0
+
+    def predict_fn(Xte, beta, IW, bias):
+        return elm_predict(Xte, beta, IW, bias, mu_y, sd_y)
+
+    return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    mu: float, sd: float,
 ) -> np.ndarray:
-    # PAC is a physical power: clip negative values to 0.
-    return np.clip(elm_sigmoid(X @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+    # beta lives in center-scaled target space: de-standardize, then _clip
+    # (no-op for non-solar targets, else clips the physical-power output to >=0).
+    z = elm_sigmoid(X @ IW.T + bias) @ beta
+    return _clip(z * sd + mu)
 
 
 # ============================================================================

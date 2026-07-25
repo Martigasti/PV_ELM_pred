@@ -14,6 +14,12 @@ Pass 2: W_EN = diag( 1 / (|beta_0,j| + eps) )
 
 Hyperparameters: (lam1, lam2) selected by validation RMSE.
 
+The target is center-scaled on the train (z = (y - mu_y) / sd_y) before both
+passes, prediction mapped back (y_pred = z_pred * sd_y + mu_y); keeps the ridge
+penalty of Pass 1 from shrinking a nonzero target mean (meteo). In z-space the
+Pass-1 |beta_0,j| stay O(1) (checked on the pressure channel), so eps=1e-6 stays
+negligible and W_EN non-degenerate. mu_y/sd_y frozen on the train (fit fold in CV).
+
 Models reported per (LB, FH):
     - Persistence_P : y_pred = PAC(t)
     - Persistence_Pcyclic : y_pred = PAC(t + FH - 24h)
@@ -23,11 +29,15 @@ Models reported per (LB, FH):
 from math import sqrt
 import numpy as np
 
-from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
+from elm_common import CLIP_NONNEG, CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
 
 LAMBDA1_GRID: list[float] = [1.0, 10.0]
 LAMBDA2_GRID: list[float] = [10.0, 25.0]
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
 EPS_W: float = 1e-6
 
 
@@ -66,13 +76,16 @@ def train_elm_elastic_net(
 
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         l1, l2 = combo
-        beta = elastic_net_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, l1, l2)
-        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        mu, sd = y_fit.mean(), y_fit.std(ddof=1); sd = sd if sd > 0 else 1.0
+        beta = elastic_net_solve(elm_sigmoid(X_fit @ IW.T + bias), (y_fit - mu) / sd, l1, l2)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = _clip(z_val * sd + mu)
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         l1, l2 = combo
-        return elastic_net_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, l1, l2), None
+        mu, sd = y_full.mean(), y_full.std(ddof=1); sd = sd if sd > 0 else 1.0
+        return elastic_net_solve(elm_sigmoid(X_full @ IW.T + bias), (y_full - mu) / sd, l1, l2), None
 
     combos = [(l1, l2) for l1 in l1s for l2 in l2s]
     beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
@@ -114,13 +127,21 @@ def train_elm_elastic_net_grid(
         "n_hidden": best_h, "n_candidates": best_c,
         "lambda1_en": best_lam1, "lambda2_en": best_lam2,
     }
-    return best_beta, best_IW, best_bias, sel_dict, elm_predict
+    mu_y, sd_y = y.mean(), y.std(ddof=1); sd_y = sd_y if sd_y > 0 else 1.0
+
+    def predict_fn(Xte, beta, IW, bias):
+        return elm_predict(Xte, beta, IW, bias, mu_y, sd_y)
+
+    return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    mu: float, sd: float,
 ) -> np.ndarray:
-    return np.clip(elm_sigmoid(X @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+    # beta lives in center-scaled target space: de-standardize, then _clip.
+    z = elm_sigmoid(X @ IW.T + bias) @ beta
+    return _clip(z * sd + mu)
 
 
 # ============================================================================

@@ -11,6 +11,13 @@ reweighted solve with W = diag(1 / sqrt(r^(0)^2 + delta^2)) approximating L1.
 
 Grid-searched hyperparameters: (lam, delta).
 
+The target is center-scaled on the train (z = (y - mu_y) / sd_y) before both
+passes, prediction mapped back (y_pred = z_pred * sd_y + mu_y); keeps the ridge
+penalty of Pass 1 from shrinking a nonzero target mean (meteo). delta is a
+fraction of sd_y (grid DELTA_GRID_Z, since r lives in z-space); the reported
+delta_mae is re-multiplied by sd_y (physical units). mu_y/sd_y frozen on the
+train (fit fold in CV).
+
 Models reported per (LB, FH):
     - Persistence_P : y_pred = PAC(t)
     - Persistence_Pcyclic : y_pred = PAC(t + FH - 24h)
@@ -20,11 +27,19 @@ Models reported per (LB, FH):
 from math import sqrt
 import numpy as np
 
-from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
+from elm_common import CLIP_NONNEG, CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
 
 
 LAMBDA_GRID: list[float] = [10.0, 25.0]
-DELTA_GRID: list[float] = [10.0, 100.0, 500.0]
+# delta grid in center-scaled (z) space: fractions of sd_y. The target is
+# solved on z (r ~ O(1)), so the old absolute-watt grid {10,100,500} would make
+# the weights flat and degenerate MAE into Ridge; {0.05,0.1,0.5}*sd_y keeps the
+# smoothing light (delta < sd_y), preserving the L1 robustness.
+DELTA_GRID_Z: list[float] = [0.05, 0.1, 0.5]
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
 
 
 # ============================================================================
@@ -52,17 +67,20 @@ def train_elm_mae(
     k: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
     lams = lam_grid if lam_grid else LAMBDA_GRID
-    deltas = delta_grid if delta_grid else DELTA_GRID
+    deltas = delta_grid if delta_grid else DELTA_GRID_Z
 
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         lam, dlt = combo
-        beta = mae_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, lam, dlt)
-        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        mu, sd = y_fit.mean(), y_fit.std(ddof=1); sd = sd if sd > 0 else 1.0
+        beta = mae_solve(elm_sigmoid(X_fit @ IW.T + bias), (y_fit - mu) / sd, lam, dlt)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = _clip(z_val * sd + mu)
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         lam, dlt = combo
-        return mae_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, lam, dlt), None
+        mu, sd = y_full.mean(), y_full.std(ddof=1); sd = sd if sd > 0 else 1.0
+        return mae_solve(elm_sigmoid(X_full @ IW.T + bias), (y_full - mu) / sd, lam, dlt), None
 
     combos = [(lam, dlt) for lam in lams for dlt in deltas]
     beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
@@ -86,7 +104,7 @@ def train_elm_mae_grid(
         for n_candidates in n_candidates_list:
             beta, IW, bias, lam_sel, delta_sel, val_rmse = train_elm_mae(
                 X, y, n_hidden, n_candidates, rng,
-                lam_grid=LAMBDA_GRID, delta_grid=DELTA_GRID, k=CV_FOLDS,
+                lam_grid=LAMBDA_GRID, delta_grid=DELTA_GRID_Z, k=CV_FOLDS,
             )
             print(
                 f"    n_hidden={n_hidden:4d}  n_cand={n_candidates:4d}  "
@@ -100,17 +118,26 @@ def train_elm_mae_grid(
         f"    -> selected: n_hidden={best_h}  n_cand={best_c}  "
         f"lam={best_lam:g}  delta={best_delta:g}  val_RMSE={best_val:.4g}"
     )
+    # delta is a fraction of sd_y in z-space; report it in physical units (x sd_y).
+    mu_y, sd_y = y.mean(), y.std(ddof=1); sd_y = sd_y if sd_y > 0 else 1.0
     sel_dict = {
         "n_hidden": best_h, "n_candidates": best_c,
-        "lambda_mae": best_lam, "delta_mae": best_delta,
+        "lambda_mae": best_lam, "delta_mae": best_delta * sd_y,
     }
-    return best_beta, best_IW, best_bias, sel_dict, elm_predict
+
+    def predict_fn(Xte, beta, IW, bias):
+        return elm_predict(Xte, beta, IW, bias, mu_y, sd_y)
+
+    return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    mu: float, sd: float,
 ) -> np.ndarray:
-    return np.clip(elm_sigmoid(X @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+    # beta lives in center-scaled target space: de-standardize, then _clip.
+    z = elm_sigmoid(X @ IW.T + bias) @ beta
+    return _clip(z * sd + mu)
 
 
 # ============================================================================
@@ -122,7 +149,7 @@ def main() -> None:
         script_name="dr_elm_mae.py",
         train_grid=train_elm_mae_grid,
         extra_cols=["N_params", "n_hidden", "n_candidates", "lambda_mae", "delta_mae"],
-        grid_print=f"MAE 2-pass: lam_grid={LAMBDA_GRID}, delta_grid={DELTA_GRID}",
+        grid_print=f"MAE 2-pass: lam_grid={LAMBDA_GRID}, delta_grid(z)={DELTA_GRID_Z}",
     )
 
 

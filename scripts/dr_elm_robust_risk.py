@@ -7,6 +7,11 @@ uncertainty magnitude on H (worst-case min-max formulation, El Ghaoui 1997):
     Ridge        : beta = (H^T H + lam I)^-1 H^T y     (lam free)
     Robust Risk  : beta = (H^T H + eps^2 I)^-1 H^T y   (lam = eps^2)
 
+The target is center-scaled on the train (z = (y - mu_y) / sd_y) before the
+solve, prediction mapped back (y_pred = z_pred * sd_y + mu_y); keeps the eps^2
+penalty from shrinking a nonzero target mean (meteo). mu_y/sd_y frozen on the
+train (fit fold in CV).
+
 Eps is selected per candidate by minimal validation RMSE over EPS_GRID.
 
 Models reported per (LB, FH):
@@ -20,10 +25,14 @@ from math import sqrt
 import numpy as np
 
 # The common part (config, baselines, runner) lives in elm_common.
-from elm_common import CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
+from elm_common import CLIP_NONNEG, CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
 
 
 EPS_GRID: list[float] = [1e-2, 0.1, 0, sqrt(10), 5.0, 10]
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
 
 
 # ============================================================================
@@ -49,13 +58,17 @@ def train_elm_robust_risk(
     """Select (IW, bias, eps) by temporal CV, then refit beta on the full train set."""
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         (eps,) = combo
-        beta = robust_risk_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, eps)
-        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        mu, sd = y_fit.mean(), y_fit.std(ddof=1); sd = sd if sd > 0 else 1.0
+        beta = robust_risk_solve(elm_sigmoid(X_fit @ IW.T + bias), (y_fit - mu) / sd, eps)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = _clip(z_val * sd + mu)
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         (eps,) = combo
-        return robust_risk_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, eps), None
+        mu, sd = y_full.mean(), y_full.std(ddof=1); sd = sd if sd > 0 else 1.0
+        beta = robust_risk_solve(elm_sigmoid(X_full @ IW.T + bias), (y_full - mu) / sd, eps)
+        return beta, None
 
     combos = [(e,) for e in eps_grid]
     beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
@@ -92,14 +105,21 @@ def train_elm_robust_risk_grid(
         f"val_RMSE={best_val:.4g}"
     )
     sel_dict = {"n_hidden": best_h, "n_candidates": best_c, "eps_robust": best_eps}
-    return best_beta, best_IW, best_bias, sel_dict, elm_predict
+    mu_y, sd_y = y.mean(), y.std(ddof=1); sd_y = sd_y if sd_y > 0 else 1.0
+
+    def predict_fn(Xte, beta, IW, bias):
+        return elm_predict(Xte, beta, IW, bias, mu_y, sd_y)
+
+    return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    mu: float, sd: float,
 ) -> np.ndarray:
-    # PAC is a physical power: clip negative values to 0.
-    return np.clip(elm_sigmoid(X @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+    # beta lives in center-scaled target space: de-standardize, then _clip.
+    z = elm_sigmoid(X @ IW.T + bias) @ beta
+    return _clip(z * sd + mu)
 
 
 # ============================================================================

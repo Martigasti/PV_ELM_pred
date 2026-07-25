@@ -10,6 +10,12 @@ Analytical solution (closed-form, 1-pass):
 
 C acts as the inverse of the noise covariance (GLS).
 
+The target is center-scaled on the train (z = (y - mu_y) / sd_y) before the
+solve (centering is applied BEFORE the C operator, since C @ 1 != 1), and the
+prediction is mapped back (y_pred = z_pred * sd_y + mu_y); keeps the sigma^2
+penalty from shrinking a nonzero target mean (meteo). mu_y/sd_y frozen on the
+train (fit fold in CV).
+
 Hyperparameters: joint grid (sigma^2, tau) selected by validation
 RMSE (chronological 20%). Rebuilt once per tau and
 reused for each sigma^2.
@@ -28,8 +34,12 @@ import os
 from math import sqrt
 import numpy as np
 
-from elm_common import CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
+from elm_common import CLIP_NONNEG, CV_FOLDS, elm_sigmoid, run_elm, select_by_temporal_cv
 
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
 
 SIGMA2_GRID: list[float] = [10.0, 25.0]
 TAU_GRID:    list[float] = [0.5, 2.0, 6.0]  # hours
@@ -111,18 +121,23 @@ def train_elm_corr(
 
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         tau, sigma2 = combo
+        mu, sd = y_fit.mean(), y_fit.std(ddof=1); sd = sd if sd > 0 else 1.0
         H_fit = elm_sigmoid(X_fit @ IW.T + bias)
         HtCH = H_fit.T @ _apply_C(H_fit, tau)
-        HtCy = H_fit.T @ _apply_C(y_fit, tau)
+        # center-scale BEFORE applying C: C @ 1 != 1, so applying C to y then
+        # subtracting mu would differ from applying C to z.
+        HtCy = H_fit.T @ _apply_C((y_fit - mu) / sd, tau)
         beta = corr_solve_from_precomputed(HtCH, HtCy, sigma2)
-        y_val_pred = np.clip(elm_sigmoid(X_val @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+        z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
+        y_val_pred = _clip(z_val * sd + mu)
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         tau, sigma2 = combo
+        mu, sd = y_full.mean(), y_full.std(ddof=1); sd = sd if sd > 0 else 1.0
         H_full = elm_sigmoid(X_full @ IW.T + bias)
         HtCH = H_full.T @ _apply_C(H_full, tau)
-        HtCy = H_full.T @ _apply_C(y_full, tau)
+        HtCy = H_full.T @ _apply_C((y_full - mu) / sd, tau)
         return corr_solve_from_precomputed(HtCH, HtCy, sigma2), None
 
     combos = [(tau, sigma2) for tau in t_grid for sigma2 in s_grid]
@@ -165,13 +180,21 @@ def train_elm_corr_grid(
         "n_hidden": best_h, "n_candidates": best_c,
         "sigma2_corr": best_sigma2, "tau_corr": best_tau,
     }
-    return best_beta, best_IW, best_bias, sel_dict, elm_predict
+    mu_y, sd_y = y.mean(), y.std(ddof=1); sd_y = sd_y if sd_y > 0 else 1.0
+
+    def predict_fn(Xte, beta, IW, bias):
+        return elm_predict(Xte, beta, IW, bias, mu_y, sd_y)
+
+    return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    mu: float, sd: float,
 ) -> np.ndarray:
-    return np.clip(elm_sigmoid(X @ IW.T + bias) @ beta, a_min=0.0, a_max=None)
+    # beta lives in center-scaled target space: de-standardize, then _clip.
+    z = elm_sigmoid(X @ IW.T + bias) @ beta
+    return _clip(z * sd + mu)
 
 
 # ============================================================================
