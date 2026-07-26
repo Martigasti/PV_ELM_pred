@@ -37,29 +37,53 @@ Models reported per (LB, FH):
 from math import sqrt
 import numpy as np
 
-from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
+from elm_common import (
+    CLIP_NONNEG, CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv,
+)
 
 
 LAMBDA_GRID: list[float] = [25.0]
 C_GRID: list[float] = [0.1, 1.0, 10.0, 100.0]
 
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
+
+
+def _log_standardize(z: np.ndarray) -> tuple[float, float]:
+    """mu/sd of the log target, center-scaled before the solve.
+
+    log(y + c) does not center: a pressure sits at z ~ 6.92 while a 1 hPa move
+    is only ~1e-3, so ridge fits the pedestal and exp() turns what is left into
+    a multiplicative error. Same fix as Box-Cox, which at lam_bc = 0 is this
+    very transform.
+    """
+    mu = float(z.mean())
+    sd = float(z.std(ddof=1))
+    return mu, (sd if sd > 0 else 1.0)
+
 
 # ============================================================================
-# ELM-Log-MSE (log-space beta, closed-form Ridge on log(y+c))
+# ELM-Log-MSE (log-space beta, closed-form Ridge on centered log(y+c))
 # ============================================================================
 def log_mse_solve(
     H: np.ndarray,
     y: np.ndarray,
     lam: float,
     c: float,
+) -> tuple[np.ndarray, float, float]:
+    """Ridge on centered z = log(y + c). Returns (beta, mu, sd)."""
+    z = np.log(y + c)
+    mu, sd = _log_standardize(z)
+    return ridge_solve(H, (z - mu) / sd, lam), mu, sd
+
+
+def log_mse_predict_raw(
+    H: np.ndarray, beta: np.ndarray, c: float, mu: float, sd: float
 ) -> np.ndarray:
-    """Ridge on z = log(y + c): closed-form, beta lives in log space."""
-    return ridge_solve(H, np.log(y + c), lam)
-
-
-def log_mse_predict_raw(H: np.ndarray, beta: np.ndarray, c: float) -> np.ndarray:
-    """beta lives in log space: y_pred = exp(H beta) - c, clipped at 0."""
-    return np.clip(np.exp(H @ beta) - c, a_min=0.0, a_max=None)
+    """beta lives in centered log space: de-standardize, exp, un-shift, _clip."""
+    eta = np.minimum((H @ beta) * sd + mu, 20.0)  # cap before exp: overflow
+    return _clip(np.exp(eta) - c)
 
 
 def train_elm_log_mse(
@@ -77,19 +101,24 @@ def train_elm_log_mse(
 
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         lam, c_val = combo
-        beta = log_mse_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, lam, c_val)
-        y_val_pred = log_mse_predict_raw(elm_sigmoid(X_val @ IW.T + bias), beta, c_val)
+        # mu/sd on the fit fold only, else the validation period leaks in.
+        beta, mu, sd = log_mse_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit, lam, c_val)
+        y_val_pred = log_mse_predict_raw(
+            elm_sigmoid(X_val @ IW.T + bias), beta, c_val, mu, sd
+        )
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         lam, c_val = combo
-        return log_mse_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, lam, c_val), None
+        beta, mu, sd = log_mse_solve(elm_sigmoid(X_full @ IW.T + bias), y_full, lam, c_val)
+        return beta, (mu, sd)  # mu/sd frozen on the full train, reused at predict
 
     combos = [(l, c_val) for l in grid_l for c_val in grid_c]
-    beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
+    beta, IW, bias, combo, extra, best_val = select_by_temporal_cv(
         X, y, n_hidden, n_candidates, rng, combos, fit_score, refit, k=k,
     )
-    return beta, IW, bias, combo[0], combo[1], best_val
+    mu, sd = extra
+    return beta, IW, bias, combo[0], combo[1], best_val, mu, sd
 
 
 def train_elm_log_mse_grid(
@@ -102,9 +131,10 @@ def train_elm_log_mse_grid(
     best_val = np.inf
     best_beta = best_IW = best_bias = None
     best_h = best_n_cand = best_lam = best_c_shift = None
+    best_mu = best_sd = None
     for n_hidden in n_hidden_list:
         for n_candidates in n_candidates_list:
-            beta, IW, bias, lam_sel, c_sel, val_rmse = train_elm_log_mse(
+            beta, IW, bias, lam_sel, c_sel, val_rmse, mu_sel, sd_sel = train_elm_log_mse(
                 X, y, n_hidden, n_candidates, rng,
                 lam_grid=LAMBDA_GRID, c_grid=C_GRID, k=CV_FOLDS,
             )
@@ -115,6 +145,7 @@ def train_elm_log_mse_grid(
             if val_rmse < best_val:
                 best_val, best_beta, best_IW, best_bias = val_rmse, beta, IW, bias
                 best_h, best_n_cand, best_lam, best_c_shift = n_hidden, n_candidates, lam_sel, c_sel
+                best_mu, best_sd = mu_sel, sd_sel
     print(
         f"    -> selected: n_hidden={best_h}  n_cand={best_n_cand}  "
         f"lam={best_lam:g}  c={best_c_shift:g}  val_RMSE={best_val:.4g}"
@@ -128,7 +159,7 @@ def train_elm_log_mse_grid(
         X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray
     ) -> np.ndarray:
         H = elm_sigmoid(X @ IW.T + bias)
-        return log_mse_predict_raw(H, beta, c=best_c_shift)
+        return log_mse_predict_raw(H, beta, best_c_shift, best_mu, best_sd)
 
     return best_beta, best_IW, best_bias, sel_dict, predict_fn
 

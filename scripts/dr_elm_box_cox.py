@@ -33,12 +33,30 @@ Models reported per (LB, FH):
 from math import sqrt
 import numpy as np
 
-from elm_common import CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv
+from elm_common import (
+    CLIP_NONNEG, CV_FOLDS, elm_sigmoid, ridge_solve, run_elm, select_by_temporal_cv,
+)
 
 
 LAMBDA_GRID: list[float] = [25.0]
 LAMBDA_BC_GRID: list[float] = [0.0, 0.25, 0.5, 0.75, 1.0]
 BC_SHIFT: float = 1.0  # shift c added to Y to guarantee Y + c > 0
+
+# Clip predictions to >=0 only for physical-power targets (skipped for non-solar
+# meteo targets, e.g. temperature, which can be negative). Mirrors dr_elm_ridge.
+_clip = (lambda a: np.clip(a, a_min=0.0, a_max=None)) if CLIP_NONNEG else (lambda a: a)
+
+
+def _bc_standardize(z: np.ndarray) -> tuple[float, float]:
+    """mu/sd of the Box-Cox target, center-scaled before the solve.
+
+    Box-Cox does not center: at lam_bc = 1 the target is y - 1, so a pressure
+    stays ~1013.8 and ridge burns its capacity on that offset. Same fix as
+    Option B, one layer down (after the transform instead of before it).
+    """
+    mu = float(z.mean())
+    sd = float(z.std(ddof=1))
+    return mu, (sd if sd > 0 else 1.0)
 
 
 # ============================================================================
@@ -80,16 +98,20 @@ def train_elm_box_cox(
 
     def fit_score(X_fit, y_fit, X_val, y_val, IW, bias, combo):
         lam_bc, lam_r = combo
-        y_fit_bc = box_cox(y_fit + BC_SHIFT, lam_bc)
-        beta = ridge_solve(elm_sigmoid(X_fit @ IW.T + bias), y_fit_bc, lam_r)
+        # mu/sd on the fit fold only, else the validation period leaks in.
+        z_fit = box_cox(y_fit + BC_SHIFT, lam_bc)
+        mu, sd = _bc_standardize(z_fit)
+        beta = ridge_solve(elm_sigmoid(X_fit @ IW.T + bias), (z_fit - mu) / sd, lam_r)
         z_val = elm_sigmoid(X_val @ IW.T + bias) @ beta
-        y_val_pred = np.clip(box_cox_inverse(z_val, lam_bc) - BC_SHIFT, a_min=0.0, a_max=None)
+        y_val_pred = _clip(box_cox_inverse(z_val * sd + mu, lam_bc) - BC_SHIFT)
         return sqrt(np.mean((y_val_pred - y_val) ** 2))
 
     def refit(X_full, y_full, IW, bias, combo):
         lam_bc, lam_r = combo
-        y_full_bc = box_cox(y_full + BC_SHIFT, lam_bc)
-        return ridge_solve(elm_sigmoid(X_full @ IW.T + bias), y_full_bc, lam_r), None
+        z_full = box_cox(y_full + BC_SHIFT, lam_bc)
+        mu, sd = _bc_standardize(z_full)
+        beta = ridge_solve(elm_sigmoid(X_full @ IW.T + bias), (z_full - mu) / sd, lam_r)
+        return beta, None
 
     combos = [(lam_bc, lam_r) for lam_bc in grid_bc for lam_r in grid_r]
     beta, IW, bias, combo, _, best_val = select_by_temporal_cv(
@@ -131,19 +153,23 @@ def train_elm_box_cox_grid(
         "n_hidden": best_h, "n_candidates": best_c,
         "lambda_ridge": best_lam_r, "lambda_bc": best_lam_bc,
     }
-    # The prediction depends on the selected lam_bc: specialized closure.
+    # Prediction needs the selected lam_bc and the mu/sd refit() used: closure.
+    z_full = box_cox(y + BC_SHIFT, best_lam_bc)
+    mu_bc, sd_bc = _bc_standardize(z_full)
+
     def predict_fn(Xte, beta, IW, bias):
-        return elm_predict(Xte, beta, IW, bias, best_lam_bc)
+        return elm_predict(Xte, beta, IW, bias, best_lam_bc, mu_bc, sd_bc)
 
     return best_beta, best_IW, best_bias, sel_dict, predict_fn
 
 
 def elm_predict(
-    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray, lam_bc: float
+    X: np.ndarray, beta: np.ndarray, IW: np.ndarray, bias: np.ndarray,
+    lam_bc: float, mu_bc: float, sd_bc: float,
 ) -> np.ndarray:
-    # PAC is a physical power: clip negative values to 0.
+    # beta lives in center-scaled Box-Cox space: de-standardize, invert, _clip.
     z = elm_sigmoid(X @ IW.T + bias) @ beta
-    return np.clip(box_cox_inverse(z, lam_bc) - BC_SHIFT, a_min=0.0, a_max=None)
+    return _clip(box_cox_inverse(z * sd_bc + mu_bc, lam_bc) - BC_SHIFT)
 
 
 # ============================================================================
